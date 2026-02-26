@@ -397,13 +397,19 @@ def run_score_batch_job(job_id: str, snapshot_id: str, biz_model: str) -> None:
 
 @app.get("/")
 def health(db: Session = Depends(get_db)) -> dict:
+    import logging
     db_ok = False
+    db_error = None
     try:
         db.execute(text("SELECT 1"))
         db_ok = True
-    except Exception:
-        pass
-    return {"name": settings.app_name, "status": "ok", "db": "ok" if db_ok else "error"}
+    except Exception as exc:
+        db_error = str(exc)
+        logging.error("DB health check failed: %s", exc)
+    result: dict = {"name": settings.app_name, "status": "ok", "db": "ok" if db_ok else "error"}
+    if db_error:
+        result["db_error"] = db_error
+    return result
 
 
 @app.get(f"{settings.api_prefix}/trending/snapshots", response_model=SnapshotResp)

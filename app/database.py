@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.config import settings
 
@@ -16,8 +17,12 @@ def _normalize_url(url: str) -> str:
 
 
 _db_url = _normalize_url(settings.database_url)
-connect_args = {"check_same_thread": False} if _db_url.startswith("sqlite") else {}
-engine = create_engine(_db_url, future=True, connect_args=connect_args)
+if _db_url.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+    engine = create_engine(_db_url, future=True, connect_args=connect_args)
+else:
+    # Use NullPool for serverless environments (Vercel): no persistent connection pool
+    engine = create_engine(_db_url, future=True, poolclass=NullPool)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
 
