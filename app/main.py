@@ -641,6 +641,9 @@ def get_scores(project_id: str, latest: bool = True, score_model_id: Optional[st
                 model_name=s.model_name,
                 total=s.total_score,
                 grade=s.grade,
+                highlights=s.highlights,
+                risks=s.risks,
+                followups=s.followups,
                 explanations=s.explanations,
             )
             for s in rows
