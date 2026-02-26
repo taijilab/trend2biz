@@ -55,7 +55,16 @@ app = FastAPI(title=settings.app_name)
 
 @app.on_event("startup")
 def startup() -> None:
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as exc:
+        import logging
+        logging.error("DB create_all failed: %s", exc)
+
+
+@app.get("/ping")
+def ping() -> dict:
+    return {"pong": True}
 
 
 # ---------------------------------------------------------------------------
