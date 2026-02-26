@@ -1,0 +1,584 @@
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Optional
+
+from dateutil.parser import isoparse
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from sqlalchemy import and_, desc, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.database import Base, SessionLocal, engine, get_db
+from app.models import (
+    BizProfile,
+    Job,
+    Project,
+    ProjectScore,
+    RepoMetricDaily,
+    Report,
+    TrendingSnapshot,
+    TrendingSnapshotItem,
+    Watchlist,
+)
+from app.schemas import (
+    BatchScoreIn,
+    BizGenerateIn,
+    BizProfileOut,
+    BizProfileResp,
+    JobResp,
+    MetricPoint,
+    MetricSeriesResp,
+    ProjectListItem,
+    ProjectListResp,
+    ProjectOut,
+    ReportIn,
+    ReportOut,
+    ScoreOut,
+    ScoreResp,
+    SnapshotFetchIn,
+    SnapshotItemOut,
+    SnapshotOut,
+    SnapshotResp,
+    WatchlistIn,
+    WatchlistItem,
+    WatchlistResp,
+)
+from app.services.biz import infer_biz_profile
+from app.services.github_metrics import GithubMetricsError, fetch_repo_metrics
+from app.services.scoring import compute_score
+from app.services.trending import fetch_trending_html, parse_trending_html
+
+app = FastAPI(title=settings.app_name)
+
+
+@app.on_event("startup")
+def startup() -> None:
+    Base.metadata.create_all(bind=engine)
+
+
+def get_or_create_project(db: Session, repo_full_name: str, repo_url: str, description: Optional[str], primary_language: Optional[str]) -> Project:
+    project = db.execute(select(Project).where(Project.repo_full_name == repo_full_name)).scalar_one_or_none()
+    if project:
+        project.last_seen_at = datetime.utcnow()
+        if description:
+            project.description = description
+        if primary_language:
+            project.primary_language = primary_language
+        return project
+    project = Project(
+        repo_full_name=repo_full_name,
+        repo_url=repo_url,
+        description=description,
+        primary_language=primary_language,
+        last_seen_at=datetime.utcnow(),
+    )
+    db.add(project)
+    db.flush()
+    return project
+
+
+def latest_metric(db: Session, project_id: str) -> Optional[RepoMetricDaily]:
+    return db.execute(
+        select(RepoMetricDaily).where(RepoMetricDaily.project_id == project_id).order_by(desc(RepoMetricDaily.metric_date)).limit(1)
+    ).scalar_one_or_none()
+
+
+def latest_biz(db: Session, project_id: str) -> Optional[BizProfile]:
+    return db.execute(
+        select(BizProfile).where(BizProfile.project_id == project_id).order_by(desc(BizProfile.created_at)).limit(1)
+    ).scalar_one_or_none()
+
+
+def latest_score(db: Session, project_id: str) -> Optional[ProjectScore]:
+    return db.execute(
+        select(ProjectScore).where(ProjectScore.project_id == project_id).order_by(desc(ProjectScore.created_at)).limit(1)
+    ).scalar_one_or_none()
+
+
+def create_job(db: Session, job_type: str, payload: Optional[dict]) -> Job:
+    job = Job(job_type=job_type, payload=payload, status="queued")
+    db.add(job)
+    db.flush()
+    return job
+
+
+def refresh_metrics_for_project(db: Session, project: Project, metric_date: date) -> RepoMetricDaily:
+    data = fetch_repo_metrics(project.repo_full_name, token=settings.github_token)
+    project.description = data.get("description") or project.description
+    project.primary_language = data.get("primary_language") or project.primary_language
+    project.license_spdx = data.get("license_spdx") or project.license_spdx
+    if data.get("created_at_github"):
+        project.created_at_github = isoparse(data["created_at_github"])
+    if data.get("updated_at_github"):
+        project.updated_at_github = isoparse(data["updated_at_github"])
+    if data.get("pushed_at_github"):
+        project.pushed_at_github = isoparse(data["pushed_at_github"])
+
+    metric = db.execute(
+        select(RepoMetricDaily).where(and_(RepoMetricDaily.project_id == project.project_id, RepoMetricDaily.metric_date == metric_date))
+    ).scalar_one_or_none()
+
+    if not metric:
+        metric = RepoMetricDaily(project_id=project.project_id, metric_date=metric_date)
+        db.add(metric)
+
+    metric.stars = data.get("stars")
+    metric.forks = data.get("forks")
+    metric.watchers = data.get("watchers")
+    metric.open_issues = data.get("open_issues")
+    metric.commits_30d = data.get("commits_30d")
+    metric.commits_90d = data.get("commits_90d")
+    metric.contributors_90d = data.get("contributors_90d")
+    metric.captured_at = datetime.utcnow()
+    db.flush()
+    return metric
+
+
+def generate_biz_and_score(db: Session, project: Project, model: str = "rule-v1") -> tuple[BizProfile, ProjectScore]:
+    biz_data = infer_biz_profile(project.repo_full_name, project.description, project.primary_language)
+    biz = BizProfile(project_id=project.project_id, model_name=model, **biz_data)
+    db.add(biz)
+    db.flush()
+
+    metric = latest_metric(db, project.project_id)
+    metric_payload = {
+        "stars": metric.stars if metric else 0,
+        "commits_30d": metric.commits_30d if metric else 0,
+        "contributors_90d": metric.contributors_90d if metric else 0,
+    }
+    score_data = compute_score(metric_payload, biz_data)
+    score = ProjectScore(
+        project_id=project.project_id,
+        model_name="yc-open-source-v1",
+        biz_profile_id=biz.biz_profile_id,
+        metric_date=metric.metric_date if metric else None,
+        market_score=score_data["market_score"],
+        traction_score=score_data["traction_score"],
+        moat_score=score_data["moat_score"],
+        team_score=score_data["team_score"],
+        monetization_score=score_data["monetization_score"],
+        risk_score=score_data["risk_score"],
+        total_score=score_data["total_score"],
+        grade=score_data["grade"],
+        highlights=score_data["highlights"],
+        risks=score_data["risks"],
+        followups=score_data["followups"],
+        explanations=score_data["explanations"],
+    )
+    db.add(score)
+    db.flush()
+    return biz, score
+
+
+def run_snapshot_fetch_job(job_id: str, since: str, language: str, spoken: Optional[str], snapshot_date: date) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        if not job:
+            return
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        db.commit()
+
+        html = fetch_trending_html(since=since, language=language, spoken=spoken)
+        parsed = parse_trending_html(html)
+
+        snapshot = db.execute(
+            select(TrendingSnapshot).where(
+                and_(
+                    TrendingSnapshot.snapshot_date == snapshot_date,
+                    TrendingSnapshot.since == since,
+                    TrendingSnapshot.language == language,
+                    TrendingSnapshot.spoken == spoken,
+                )
+            )
+        ).scalar_one_or_none()
+        if not snapshot:
+            snapshot = TrendingSnapshot(snapshot_date=snapshot_date, since=since, language=language, spoken=spoken)
+            db.add(snapshot)
+            db.flush()
+
+        db.query(TrendingSnapshotItem).filter(TrendingSnapshotItem.snapshot_id == snapshot.snapshot_id).delete()
+
+        for item in parsed:
+            project = get_or_create_project(
+                db=db,
+                repo_full_name=item.repo_full_name,
+                repo_url=item.repo_url,
+                description=item.description,
+                primary_language=item.primary_language,
+            )
+            db.add(
+                TrendingSnapshotItem(
+                    snapshot_id=snapshot.snapshot_id,
+                    rank=item.rank,
+                    project_id=project.project_id,
+                    repo_full_name=item.repo_full_name,
+                    repo_url=item.repo_url,
+                    description=item.description,
+                    primary_language=item.primary_language,
+                    stars_total_hint=item.stars_total_hint,
+                    forks_total_hint=item.forks_total_hint,
+                    stars_delta_window=item.stars_delta_window,
+                )
+            )
+
+        job.status = "succeeded"
+        job.finished_at = datetime.utcnow()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.get(Job, job_id)
+        if job:
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+@app.get("/")
+def health() -> dict:
+    return {"name": settings.app_name, "status": "ok"}
+
+
+@app.get(f"{settings.api_prefix}/trending/snapshots", response_model=SnapshotResp)
+def get_trending_snapshots(
+    since: str = Query(..., pattern="^(daily|weekly|monthly)$"),
+    date_param: Optional[date] = Query(default=None, alias="date"),
+    language: str = "all",
+    spoken: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    target_date = date_param or date.today()
+    snapshot = db.execute(
+        select(TrendingSnapshot).where(
+            and_(
+                TrendingSnapshot.snapshot_date == target_date,
+                TrendingSnapshot.since == since,
+                TrendingSnapshot.language == language,
+                TrendingSnapshot.spoken == spoken,
+            )
+        )
+    ).scalar_one_or_none()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+
+    items = db.execute(
+        select(TrendingSnapshotItem)
+        .where(TrendingSnapshotItem.snapshot_id == snapshot.snapshot_id)
+        .order_by(TrendingSnapshotItem.rank.asc())
+        .limit(limit)
+    ).scalars()
+
+    return SnapshotResp(
+        snapshot=SnapshotOut(
+            snapshot_id=snapshot.snapshot_id,
+            date=snapshot.snapshot_date,
+            since=snapshot.since,
+            language=snapshot.language,
+            spoken=snapshot.spoken,
+            captured_at=snapshot.captured_at,
+        ),
+        items=[
+            SnapshotItemOut(
+                rank=i.rank,
+                repo_full_name=i.repo_full_name,
+                repo_url=i.repo_url,
+                description=i.description,
+                primary_language=i.primary_language,
+                stars_total_hint=i.stars_total_hint,
+                forks_total_hint=i.forks_total_hint,
+                stars_delta_window=i.stars_delta_window,
+            )
+            for i in items
+        ],
+    )
+
+
+@app.post(f"{settings.api_prefix}/trending/snapshots:fetch", response_model=JobResp, status_code=202)
+def fetch_snapshot(payload: SnapshotFetchIn, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    job = create_job(
+        db=db,
+        job_type="trending_fetch",
+        payload={"since": payload.since, "language": payload.language, "spoken": payload.spoken, "date": str(date.today())},
+    )
+    db.commit()
+    background_tasks.add_task(run_snapshot_fetch_job, job.job_id, payload.since, payload.language, payload.spoken, date.today())
+    return JobResp(job_id=job.job_id, status=job.status)
+
+
+@app.get(f"{settings.api_prefix}/projects", response_model=ProjectListResp)
+def list_projects(
+    q: Optional[str] = None,
+    language: Optional[str] = None,
+    min_score: Optional[float] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    stmt = select(Project)
+    if q:
+        stmt = stmt.where(Project.repo_full_name.ilike(f"%{q}%"))
+    if language:
+        stmt = stmt.where(Project.primary_language == language)
+
+    projects = db.execute(stmt.order_by(desc(Project.last_seen_at)).limit(limit)).scalars().all()
+
+    items: list[ProjectListItem] = []
+    for p in projects:
+        score = latest_score(db, p.project_id)
+        if min_score is not None and (not score or score.total_score < min_score):
+            continue
+        biz = latest_biz(db, p.project_id)
+        items.append(
+            ProjectListItem(
+                project_id=p.project_id,
+                repo_full_name=p.repo_full_name,
+                primary_language=p.primary_language,
+                latest_score={"total": score.total_score, "grade": score.grade} if score else None,
+                latest_biz={
+                    "category": biz.category,
+                    "monetization_candidates": biz.monetization_candidates,
+                }
+                if biz
+                else None,
+            )
+        )
+    return ProjectListResp(items=items)
+
+
+@app.get(f"{settings.api_prefix}/projects/{{project_id}}", response_model=ProjectOut)
+def project_detail(project_id: str, db: Session = Depends(get_db)):
+    p = db.get(Project, project_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    metric = latest_metric(db, project_id)
+    biz = latest_biz(db, project_id)
+    score = latest_score(db, project_id)
+
+    return ProjectOut(
+        project={
+            "project_id": p.project_id,
+            "repo_full_name": p.repo_full_name,
+            "repo_url": p.repo_url,
+            "license": p.license_spdx,
+            "created_at": p.created_at_github,
+        },
+        latest_metrics={
+            "as_of": metric.metric_date,
+            "stars": metric.stars,
+            "forks": metric.forks,
+            "commits_30d": metric.commits_30d,
+            "contributors_90d": metric.contributors_90d,
+        }
+        if metric
+        else None,
+        latest_biz_profile={
+            "category": biz.category,
+            "value_props": biz.value_props,
+            "buyer": biz.buyer,
+            "monetization_candidates": biz.monetization_candidates,
+        }
+        if biz
+        else None,
+        latest_score={
+            "total": score.total_score,
+            "grade": score.grade,
+            "breakdown": {
+                "market": score.market_score,
+                "traction": score.traction_score,
+                "moat": score.moat_score,
+                "team": score.team_score,
+                "monetization": score.monetization_score,
+                "risk": score.risk_score,
+            },
+        }
+        if score
+        else None,
+    )
+
+
+@app.get(f"{settings.api_prefix}/projects/{{project_id}}/metrics", response_model=MetricSeriesResp)
+def project_metrics(project_id: str, from_date: date = Query(alias="from"), to_date: date = Query(alias="to"), db: Session = Depends(get_db)):
+    rows = db.execute(
+        select(RepoMetricDaily)
+        .where(
+            and_(
+                RepoMetricDaily.project_id == project_id,
+                RepoMetricDaily.metric_date >= from_date,
+                RepoMetricDaily.metric_date <= to_date,
+            )
+        )
+        .order_by(RepoMetricDaily.metric_date.asc())
+    ).scalars()
+    return MetricSeriesResp(
+        series=[
+            MetricPoint(
+                date=r.metric_date,
+                stars=r.stars,
+                forks=r.forks,
+                commits_30d=r.commits_30d,
+                contributors_90d=r.contributors_90d,
+            )
+            for r in rows
+        ]
+    )
+
+
+@app.post(f"{settings.api_prefix}/projects/{{project_id}}/metrics:refresh", response_model=JobResp, status_code=202)
+def refresh_project_metrics(project_id: str, db: Session = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    job = create_job(db, "metrics_refresh", {"project_id": project_id})
+    try:
+        job.status = "running"
+        refresh_metrics_for_project(db, project, date.today())
+        job.status = "succeeded"
+        job.finished_at = datetime.utcnow()
+        db.commit()
+    except GithubMetricsError as exc:
+        db.rollback()
+        job = db.get(Job, job.job_id)
+        if job:
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = datetime.utcnow()
+            db.commit()
+    return JobResp(job_id=job.job_id, status=job.status)
+
+
+@app.get(f"{settings.api_prefix}/projects/{{project_id}}/biz-profiles", response_model=BizProfileResp)
+def get_biz_profiles(project_id: str, latest: bool = True, version_id: Optional[str] = None, db: Session = Depends(get_db)):
+    stmt = select(BizProfile).where(BizProfile.project_id == project_id).order_by(desc(BizProfile.created_at))
+    if version_id:
+        stmt = select(BizProfile).where(BizProfile.biz_profile_id == version_id)
+    items = db.execute(stmt.limit(1 if latest and not version_id else 20)).scalars().all()
+
+    return BizProfileResp(
+        items=[
+            BizProfileOut(
+                biz_profile_id=i.biz_profile_id,
+                version=i.model_name,
+                created_at=i.created_at,
+                category=i.category,
+                confidence=i.confidence,
+            )
+            for i in items
+        ]
+    )
+
+
+@app.post(f"{settings.api_prefix}/projects/{{project_id}}/biz-profiles:generate", response_model=JobResp, status_code=202)
+def generate_biz_profiles(project_id: str, payload: BizGenerateIn, db: Session = Depends(get_db)):
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    job = create_job(db, "biz_generate", {"project_id": project_id, "model": payload.model})
+    job.status = "running"
+    generate_biz_and_score(db, project, model=payload.model or "rule-v1")
+    job.status = "succeeded"
+    job.finished_at = datetime.utcnow()
+    db.commit()
+    return JobResp(job_id=job.job_id, status=job.status)
+
+
+@app.get(f"{settings.api_prefix}/projects/{{project_id}}/scores", response_model=ScoreResp)
+def get_scores(project_id: str, latest: bool = True, score_model_id: Optional[str] = None, db: Session = Depends(get_db)):
+    stmt = select(ProjectScore).where(ProjectScore.project_id == project_id).order_by(desc(ProjectScore.created_at))
+    if score_model_id:
+        stmt = stmt.where(ProjectScore.model_name == score_model_id)
+    rows = db.execute(stmt.limit(1 if latest and not score_model_id else 20)).scalars().all()
+    return ScoreResp(
+        items=[
+            ScoreOut(
+                score_id=s.score_id,
+                model_name=s.model_name,
+                total=s.total_score,
+                grade=s.grade,
+                explanations=s.explanations,
+            )
+            for s in rows
+        ]
+    )
+
+
+@app.post(f"{settings.api_prefix}/scores:batch", response_model=JobResp, status_code=202)
+def batch_score(payload: BatchScoreIn, db: Session = Depends(get_db)):
+    snapshot = db.get(TrendingSnapshot, payload.snapshot_id)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+
+    job = create_job(db, "score_batch", payload.model_dump())
+    job.status = "running"
+
+    items = db.execute(select(TrendingSnapshotItem).where(TrendingSnapshotItem.snapshot_id == snapshot.snapshot_id)).scalars().all()
+    for item in items:
+        project = db.get(Project, item.project_id)
+        if not project:
+            continue
+        generate_biz_and_score(db, project, model=payload.biz_profile_model or "rule-v1")
+
+    job.status = "succeeded"
+    job.finished_at = datetime.utcnow()
+    db.commit()
+    return JobResp(job_id=job.job_id, status=job.status)
+
+
+@app.post(f"{settings.api_prefix}/reports:generate", response_model=ReportOut)
+def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
+    project = db.get(Project, payload.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+
+    score = latest_score(db, project.project_id)
+    biz = latest_biz(db, project.project_id)
+
+    html = (
+        f"<h1>{project.repo_full_name}</h1>"
+        f"<p>{project.description or ''}</p>"
+        f"<p>Score: {(score.total_score if score else 'N/A')} ({(score.grade if score else 'N/A')})</p>"
+        f"<p>Category: {(biz.category if biz else 'N/A')}</p>"
+    )
+
+    report = Report(project_id=project.project_id, score_id=score.score_id if score else None, format=payload.format, content=html)
+    db.add(report)
+    db.commit()
+    return ReportOut(report_id=report.report_id, url=f"/reports/{report.report_id}")
+
+
+@app.post(f"{settings.api_prefix}/watchlist", response_model=WatchlistItem)
+def add_watchlist(payload: WatchlistIn, db: Session = Depends(get_db)):
+    if not db.get(Project, payload.project_id):
+        raise HTTPException(status_code=404, detail="project not found")
+    watch = Watchlist(project_id=payload.project_id, note=payload.note)
+    db.add(watch)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        watch = db.execute(select(Watchlist).where(Watchlist.project_id == payload.project_id)).scalar_one()
+    return WatchlistItem(project_id=watch.project_id, note=watch.note, created_at=watch.created_at)
+
+
+@app.get(f"{settings.api_prefix}/watchlist", response_model=WatchlistResp)
+def get_watchlist(db: Session = Depends(get_db)):
+    rows = db.execute(select(Watchlist).order_by(desc(Watchlist.created_at))).scalars().all()
+    return WatchlistResp(items=[WatchlistItem(project_id=r.project_id, note=r.note, created_at=r.created_at) for r in rows])
+
+
+@app.delete(f"{settings.api_prefix}/watchlist/{{project_id}}")
+def delete_watchlist(project_id: str, db: Session = Depends(get_db)):
+    row = db.execute(select(Watchlist).where(Watchlist.project_id == project_id)).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="watchlist item not found")
+    db.delete(row)
+    db.commit()
+    return {"deleted": True}
