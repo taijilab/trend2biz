@@ -92,6 +92,9 @@ class ScoreOut(BaseModel):
     model_name: str
     total: float
     grade: str
+    highlights: Optional[list]
+    risks: Optional[list]
+    followups: Optional[list]
     explanations: Optional[dict]
 
 

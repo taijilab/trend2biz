@@ -5,7 +5,7 @@ from typing import Optional
 
 from dateutil.parser import isoparse
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
-from sqlalchemy import and_, desc, select
+from sqlalchemy import and_, desc, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -57,6 +57,10 @@ app = FastAPI(title=settings.app_name)
 def startup() -> None:
     Base.metadata.create_all(bind=engine)
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def get_or_create_project(db: Session, repo_full_name: str, repo_url: str, description: Optional[str], primary_language: Optional[str]) -> Project:
     project = db.execute(select(Project).where(Project.repo_full_name == repo_full_name)).scalar_one_or_none()
@@ -136,24 +140,41 @@ def refresh_metrics_for_project(db: Session, project: Project, metric_date: date
     return metric
 
 
-def generate_biz_and_score(db: Session, project: Project, model: str = "rule-v1") -> tuple[BizProfile, ProjectScore]:
-    biz_data = infer_biz_profile(project.repo_full_name, project.description, project.primary_language)
-    biz = BizProfile(project_id=project.project_id, model_name=model, **biz_data)
-    db.add(biz)
-    db.flush()
+def upsert_score(db: Session, project: Project, model: str, biz_id: Optional[str], metric_date: Optional[date], score_data: dict) -> ProjectScore:
+    """Insert or replace score for (project, model, metric_date)."""
+    existing = db.execute(
+        select(ProjectScore).where(
+            and_(
+                ProjectScore.project_id == project.project_id,
+                ProjectScore.model_name == model,
+                ProjectScore.metric_date == metric_date,
+            )
+        )
+    ).scalar_one_or_none()
 
-    metric = latest_metric(db, project.project_id)
-    metric_payload = {
-        "stars": metric.stars if metric else 0,
-        "commits_30d": metric.commits_30d if metric else 0,
-        "contributors_90d": metric.contributors_90d if metric else 0,
-    }
-    score_data = compute_score(metric_payload, biz_data)
+    if existing:
+        existing.biz_profile_id = biz_id
+        existing.created_at = datetime.utcnow()
+        existing.market_score = score_data["market_score"]
+        existing.traction_score = score_data["traction_score"]
+        existing.moat_score = score_data["moat_score"]
+        existing.team_score = score_data["team_score"]
+        existing.monetization_score = score_data["monetization_score"]
+        existing.risk_score = score_data["risk_score"]
+        existing.total_score = score_data["total_score"]
+        existing.grade = score_data["grade"]
+        existing.highlights = score_data["highlights"]
+        existing.risks = score_data["risks"]
+        existing.followups = score_data["followups"]
+        existing.explanations = score_data["explanations"]
+        db.flush()
+        return existing
+
     score = ProjectScore(
         project_id=project.project_id,
-        model_name="yc-open-source-v1",
-        biz_profile_id=biz.biz_profile_id,
-        metric_date=metric.metric_date if metric else None,
+        model_name=model,
+        biz_profile_id=biz_id,
+        metric_date=metric_date,
         market_score=score_data["market_score"],
         traction_score=score_data["traction_score"],
         moat_score=score_data["moat_score"],
@@ -169,8 +190,36 @@ def generate_biz_and_score(db: Session, project: Project, model: str = "rule-v1"
     )
     db.add(score)
     db.flush()
+    return score
+
+
+def generate_biz_and_score(db: Session, project: Project, model: str = "rule-v1") -> tuple[BizProfile, ProjectScore]:
+    biz_data = infer_biz_profile(project.repo_full_name, project.description, project.primary_language)
+    biz = BizProfile(project_id=project.project_id, model_name=model, **biz_data)
+    db.add(biz)
+    db.flush()
+
+    metric = latest_metric(db, project.project_id)
+    metric_payload = {
+        "stars": metric.stars if metric else 0,
+        "commits_30d": metric.commits_30d if metric else 0,
+        "contributors_90d": metric.contributors_90d if metric else 0,
+    }
+    score_data = compute_score(metric_payload, biz_data)
+    score = upsert_score(
+        db=db,
+        project=project,
+        model="yc-open-source-v1",
+        biz_id=biz.biz_profile_id,
+        metric_date=metric.metric_date if metric else None,
+        score_data=score_data,
+    )
     return biz, score
 
+
+# ---------------------------------------------------------------------------
+# Background job runners
+# ---------------------------------------------------------------------------
 
 def run_snapshot_fetch_job(job_id: str, since: str, language: str, spoken: Optional[str], snapshot_date: date) -> None:
     db = SessionLocal()
@@ -230,6 +279,7 @@ def run_snapshot_fetch_job(job_id: str, since: str, language: str, spoken: Optio
         db.commit()
     except Exception as exc:
         db.rollback()
+        # Re-fetch job by id string (object may be expired after rollback)
         job = db.get(Job, job_id)
         if job:
             job.status = "failed"
@@ -240,9 +290,111 @@ def run_snapshot_fetch_job(job_id: str, since: str, language: str, spoken: Optio
         db.close()
 
 
+def run_metrics_refresh_job(job_id: str, project_id: str, metric_date: date) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        if not job:
+            return
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        db.commit()
+
+        project = db.get(Project, project_id)
+        if not project:
+            raise ValueError(f"project {project_id} not found")
+        refresh_metrics_for_project(db, project, metric_date)
+
+        job.status = "succeeded"
+        job.finished_at = datetime.utcnow()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.get(Job, job_id)
+        if job:
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+def run_biz_generate_job(job_id: str, project_id: str, model: str) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        if not job:
+            return
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        db.commit()
+
+        project = db.get(Project, project_id)
+        if not project:
+            raise ValueError(f"project {project_id} not found")
+        generate_biz_and_score(db, project, model=model)
+
+        job.status = "succeeded"
+        job.finished_at = datetime.utcnow()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.get(Job, job_id)
+        if job:
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+def run_score_batch_job(job_id: str, snapshot_id: str, biz_model: str) -> None:
+    db = SessionLocal()
+    try:
+        job = db.get(Job, job_id)
+        if not job:
+            return
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        db.commit()
+
+        items = db.execute(select(TrendingSnapshotItem).where(TrendingSnapshotItem.snapshot_id == snapshot_id)).scalars().all()
+        for item in items:
+            project = db.get(Project, item.project_id)
+            if not project:
+                continue
+            generate_biz_and_score(db, project, model=biz_model)
+
+        job.status = "succeeded"
+        job.finished_at = datetime.utcnow()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        job = db.get(Job, job_id)
+        if job:
+            job.status = "failed"
+            job.error = str(exc)
+            job.finished_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.get("/")
-def health() -> dict:
-    return {"name": settings.app_name, "status": "ok"}
+def health(db: Session = Depends(get_db)) -> dict:
+    db_ok = False
+    try:
+        db.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        pass
+    return {"name": settings.app_name, "status": "ok", "db": "ok" if db_ok else "error"}
 
 
 @app.get(f"{settings.api_prefix}/trending/snapshots", response_model=SnapshotResp)
@@ -431,26 +583,14 @@ def project_metrics(project_id: str, from_date: date = Query(alias="from"), to_d
 
 
 @app.post(f"{settings.api_prefix}/projects/{{project_id}}/metrics:refresh", response_model=JobResp, status_code=202)
-def refresh_project_metrics(project_id: str, db: Session = Depends(get_db)):
+def refresh_project_metrics(project_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
 
     job = create_job(db, "metrics_refresh", {"project_id": project_id})
-    try:
-        job.status = "running"
-        refresh_metrics_for_project(db, project, date.today())
-        job.status = "succeeded"
-        job.finished_at = datetime.utcnow()
-        db.commit()
-    except GithubMetricsError as exc:
-        db.rollback()
-        job = db.get(Job, job.job_id)
-        if job:
-            job.status = "failed"
-            job.error = str(exc)
-            job.finished_at = datetime.utcnow()
-            db.commit()
+    db.commit()
+    background_tasks.add_task(run_metrics_refresh_job, job.job_id, project_id, date.today())
     return JobResp(job_id=job.job_id, status=job.status)
 
 
@@ -476,17 +616,15 @@ def get_biz_profiles(project_id: str, latest: bool = True, version_id: Optional[
 
 
 @app.post(f"{settings.api_prefix}/projects/{{project_id}}/biz-profiles:generate", response_model=JobResp, status_code=202)
-def generate_biz_profiles(project_id: str, payload: BizGenerateIn, db: Session = Depends(get_db)):
+def generate_biz_profiles(project_id: str, payload: BizGenerateIn, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     project = db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
 
-    job = create_job(db, "biz_generate", {"project_id": project_id, "model": payload.model})
-    job.status = "running"
-    generate_biz_and_score(db, project, model=payload.model or "rule-v1")
-    job.status = "succeeded"
-    job.finished_at = datetime.utcnow()
+    model = payload.model or "rule-v1"
+    job = create_job(db, "biz_generate", {"project_id": project_id, "model": model})
     db.commit()
+    background_tasks.add_task(run_biz_generate_job, job.job_id, project_id, model)
     return JobResp(job_id=job.job_id, status=job.status)
 
 
@@ -503,6 +641,9 @@ def get_scores(project_id: str, latest: bool = True, score_model_id: Optional[st
                 model_name=s.model_name,
                 total=s.total_score,
                 grade=s.grade,
+                highlights=s.highlights,
+                risks=s.risks,
+                followups=s.followups,
                 explanations=s.explanations,
             )
             for s in rows
@@ -511,24 +652,15 @@ def get_scores(project_id: str, latest: bool = True, score_model_id: Optional[st
 
 
 @app.post(f"{settings.api_prefix}/scores:batch", response_model=JobResp, status_code=202)
-def batch_score(payload: BatchScoreIn, db: Session = Depends(get_db)):
+def batch_score(payload: BatchScoreIn, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     snapshot = db.get(TrendingSnapshot, payload.snapshot_id)
     if not snapshot:
         raise HTTPException(status_code=404, detail="snapshot not found")
 
+    biz_model = payload.biz_profile_model or "rule-v1"
     job = create_job(db, "score_batch", payload.model_dump())
-    job.status = "running"
-
-    items = db.execute(select(TrendingSnapshotItem).where(TrendingSnapshotItem.snapshot_id == snapshot.snapshot_id)).scalars().all()
-    for item in items:
-        project = db.get(Project, item.project_id)
-        if not project:
-            continue
-        generate_biz_and_score(db, project, model=payload.biz_profile_model or "rule-v1")
-
-    job.status = "succeeded"
-    job.finished_at = datetime.utcnow()
     db.commit()
+    background_tasks.add_task(run_score_batch_job, job.job_id, payload.snapshot_id, biz_model)
     return JobResp(job_id=job.job_id, status=job.status)
 
 
@@ -541,12 +673,22 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     score = latest_score(db, project.project_id)
     biz = latest_biz(db, project.project_id)
 
-    html = (
-        f"<h1>{project.repo_full_name}</h1>"
-        f"<p>{project.description or ''}</p>"
-        f"<p>Score: {(score.total_score if score else 'N/A')} ({(score.grade if score else 'N/A')})</p>"
-        f"<p>Category: {(biz.category if biz else 'N/A')}</p>"
-    )
+    highlights_html = "".join(f"<li>{h}</li>" for h in (score.highlights or [])) if score else ""
+    risks_html = "".join(f"<li>{r}</li>" for r in (score.risks or [])) if score else ""
+    followups_html = "".join(f"<li>{f}</li>" for f in (score.followups or [])) if score else ""
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>{project.repo_full_name}</title></head>
+<body>
+<h1>{project.repo_full_name}</h1>
+<p><a href="{project.repo_url}">{project.repo_url}</a></p>
+<p>{project.description or ''}</p>
+<h2>评分：{score.total_score if score else 'N/A'} ({score.grade if score else 'N/A'})</h2>
+<h3>商业化分类：{biz.category if biz else 'N/A'}</h3>
+<h3>亮点</h3><ul>{highlights_html}</ul>
+<h3>风险</h3><ul>{risks_html}</ul>
+<h3>追问清单</h3><ul>{followups_html}</ul>
+</body></html>"""
 
     report = Report(project_id=project.project_id, score_id=score.score_id if score else None, format=payload.format, content=html)
     db.add(report)
