@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import pathlib
 import sys
 import time
 from datetime import date, datetime
@@ -10,6 +11,7 @@ from typing import Optional
 
 from dateutil.parser import isoparse
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import and_, desc, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -87,6 +89,10 @@ _setup_logging()
 logger = logging.getLogger("trend2biz")
 
 app = FastAPI(title=settings.app_name)
+
+_STATIC_DIR = pathlib.Path(__file__).parent.parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/web", StaticFiles(directory=str(_STATIC_DIR), html=True), name="web")
 
 
 @app.on_event("startup")
