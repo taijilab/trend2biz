@@ -328,7 +328,6 @@ async function loadDashboard(date, since, forceRefetch = false) {
             <h3>暂无数据</h3>
             <p>${date} 尚无 ${since} Trending 数据</p>
           </div>`;
-        document.getElementById('btn-fetch').style.display = 'none';
         document.getElementById('footer-info').textContent = `${date} · ${since} · 无数据`;
         return;
       }
@@ -346,7 +345,6 @@ async function loadDashboard(date, since, forceRefetch = false) {
             <p>点击按钮抓取今日 GitHub Trending</p>
             <button class="empty-fetch-btn" id="empty-fetch-btn">&#9889; 抓取今日 Trending</button>
           </div>`;
-        document.getElementById('btn-fetch').style.display = 'block';
         document.getElementById('empty-fetch-btn').addEventListener('click', () => {
           document.getElementById('empty-fetch-btn').disabled = true;
           document.getElementById('empty-fetch-btn').textContent = '抓取中...';
@@ -356,9 +354,6 @@ async function loadDashboard(date, since, forceRefetch = false) {
         return;
       }
     }
-
-    // Hide fetch button when data is present
-    document.getElementById('btn-fetch').style.display = 'none';
 
     // Fetch projects for biz/score merge
     const projects = await fetchProjects();
@@ -415,6 +410,9 @@ function init() {
   });
 
   btnFetch.addEventListener('click', () => {
+    currentDate = todayStr();
+    dateInput.value = currentDate;
+    btnNext.disabled = true;
     loadDashboard(currentDate, currentSince, true);
   });
 

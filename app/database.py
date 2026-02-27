@@ -18,7 +18,7 @@ def _normalize_url(url: str) -> str:
 
 _db_url = _normalize_url(settings.database_url)
 if _db_url.startswith("sqlite"):
-    connect_args = {"check_same_thread": False}
+    connect_args = {"check_same_thread": False, "timeout": 30}
     engine = create_engine(_db_url, future=True, connect_args=connect_args)
 else:
     # Use NullPool for serverless environments (Vercel): no persistent connection pool
