@@ -212,6 +212,15 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=1, help="对前 N 个项目拉指标+分析，默认 1")
     args = parser.parse_args()
 
+    # 优先级: --token 参数 > 环境变量 > .env 文件
+    if not args.token and not os.environ.get("GITHUB_TOKEN"):
+        env_file = ROOT / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if line.startswith("GITHUB_TOKEN=") and not line.startswith("#"):
+                    os.environ["GITHUB_TOKEN"] = line.split("=", 1)[1].strip()
+                    break
     token = args.token or os.environ.get("GITHUB_TOKEN", "")
     env = {}
     if token:
