@@ -143,3 +143,16 @@ class ProjectOut(BaseModel):
     latest_metrics: Optional[dict]
     latest_biz_profile: Optional[dict]
     latest_score: Optional[dict]
+
+
+class JobDetailResp(BaseModel):
+    job_id: str
+    job_type: str
+    status: str
+    retry_count: int
+    max_retries: int
+    created_at: datetime
+    started_at: Optional[datetime]
+    finished_at: Optional[datetime]
+    error: Optional[str]
+    payload: Optional[dict]

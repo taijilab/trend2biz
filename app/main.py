@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import base64
+import json
+import logging
+import sys
+import time
 from datetime import date, datetime
 from typing import Optional
 
@@ -27,6 +32,7 @@ from app.schemas import (
     BizGenerateIn,
     BizProfileOut,
     BizProfileResp,
+    JobDetailResp,
     JobResp,
     MetricPoint,
     MetricSeriesResp,
@@ -46,9 +52,39 @@ from app.schemas import (
     WatchlistResp,
 )
 from app.services.biz import infer_biz_profile
-from app.services.github_metrics import GithubMetricsError, fetch_repo_metrics
+from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_repo_metrics
 from app.services.scoring import compute_score
 from app.services.trending import fetch_trending_html, parse_trending_html
+
+
+# ---------------------------------------------------------------------------
+# Structured logging
+# ---------------------------------------------------------------------------
+
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        doc: dict = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            doc["exc"] = self.formatException(record.exc_info)
+        return json.dumps(doc, ensure_ascii=False)
+
+
+def _setup_logging() -> None:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_JsonFormatter())
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+
+_setup_logging()
+logger = logging.getLogger("trend2biz")
 
 app = FastAPI(title=settings.app_name)
 
@@ -58,8 +94,7 @@ def startup() -> None:
     try:
         Base.metadata.create_all(bind=engine)
     except Exception as exc:
-        import logging
-        logging.error("DB create_all failed: %s", exc)
+        logger.error("DB create_all failed: %s", exc)
 
 
 @app.get("/ping")
@@ -227,168 +262,180 @@ def generate_biz_and_score(db: Session, project: Project, model: str = "rule-v1"
 
 
 # ---------------------------------------------------------------------------
-# Background job runners
+# Cursor pagination helpers
 # ---------------------------------------------------------------------------
 
-def run_snapshot_fetch_job(job_id: str, since: str, language: str, spoken: Optional[str], snapshot_date: date) -> None:
-    db = SessionLocal()
+def _encode_cursor(last_seen_at: datetime, project_id: str) -> str:
+    raw = f"{last_seen_at.isoformat()}|{project_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, str]:
     try:
-        job = db.get(Job, job_id)
-        if not job:
-            return
-        job.status = "running"
-        job.started_at = datetime.utcnow()
-        db.commit()
+        # Add padding to handle base64 without padding
+        padded = cursor + "==" * ((4 - len(cursor) % 4) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode()).decode()
+        ts_str, project_id = raw.split("|", 1)
+        return datetime.fromisoformat(ts_str), project_id
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid cursor")
 
-        html = fetch_trending_html(since=since, language=language, spoken=spoken)
-        parsed = parse_trending_html(html)
 
-        snapshot = db.execute(
-            select(TrendingSnapshot).where(
-                and_(
-                    TrendingSnapshot.snapshot_date == snapshot_date,
-                    TrendingSnapshot.since == since,
-                    TrendingSnapshot.language == language,
-                    TrendingSnapshot.spoken == spoken,
-                )
+# ---------------------------------------------------------------------------
+# Background job work functions (no DB commit — wrapper commits)
+# ---------------------------------------------------------------------------
+
+def _do_snapshot_fetch(db: Session, since: str, language: str, spoken: Optional[str], snapshot_date: date) -> None:
+    html = fetch_trending_html(since=since, language=language, spoken=spoken)
+    parsed = parse_trending_html(html)
+
+    snapshot = db.execute(
+        select(TrendingSnapshot).where(
+            and_(
+                TrendingSnapshot.snapshot_date == snapshot_date,
+                TrendingSnapshot.since == since,
+                TrendingSnapshot.language == language,
+                TrendingSnapshot.spoken == spoken,
             )
-        ).scalar_one_or_none()
-        if not snapshot:
-            snapshot = TrendingSnapshot(snapshot_date=snapshot_date, since=since, language=language, spoken=spoken)
-            db.add(snapshot)
-            db.flush()
+        )
+    ).scalar_one_or_none()
+    if not snapshot:
+        snapshot = TrendingSnapshot(snapshot_date=snapshot_date, since=since, language=language, spoken=spoken)
+        db.add(snapshot)
+        db.flush()
 
-        db.query(TrendingSnapshotItem).filter(TrendingSnapshotItem.snapshot_id == snapshot.snapshot_id).delete()
+    db.query(TrendingSnapshotItem).filter(TrendingSnapshotItem.snapshot_id == snapshot.snapshot_id).delete()
 
-        for item in parsed:
-            project = get_or_create_project(
-                db=db,
+    for item in parsed:
+        project = get_or_create_project(
+            db=db,
+            repo_full_name=item.repo_full_name,
+            repo_url=item.repo_url,
+            description=item.description,
+            primary_language=item.primary_language,
+        )
+        db.add(
+            TrendingSnapshotItem(
+                snapshot_id=snapshot.snapshot_id,
+                rank=item.rank,
+                project_id=project.project_id,
                 repo_full_name=item.repo_full_name,
                 repo_url=item.repo_url,
                 description=item.description,
                 primary_language=item.primary_language,
+                stars_total_hint=item.stars_total_hint,
+                forks_total_hint=item.forks_total_hint,
+                stars_delta_window=item.stars_delta_window,
             )
-            db.add(
-                TrendingSnapshotItem(
-                    snapshot_id=snapshot.snapshot_id,
-                    rank=item.rank,
-                    project_id=project.project_id,
-                    repo_full_name=item.repo_full_name,
-                    repo_url=item.repo_url,
-                    description=item.description,
-                    primary_language=item.primary_language,
-                    stars_total_hint=item.stars_total_hint,
-                    forks_total_hint=item.forks_total_hint,
-                    stars_delta_window=item.stars_delta_window,
-                )
-            )
+        )
 
-        job.status = "succeeded"
-        job.finished_at = datetime.utcnow()
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        # Re-fetch job by id string (object may be expired after rollback)
-        job = db.get(Job, job_id)
-        if job:
-            job.status = "failed"
-            job.error = str(exc)
-            job.finished_at = datetime.utcnow()
-            db.commit()
+
+def _do_metrics_refresh(db: Session, project_id: str, metric_date: date) -> None:
+    project = db.get(Project, project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    refresh_metrics_for_project(db, project, metric_date)
+
+
+def _do_biz_generate(db: Session, project_id: str, model: str) -> None:
+    project = db.get(Project, project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    generate_biz_and_score(db, project, model=model)
+
+
+def _do_score_batch(db: Session, snapshot_id: str, biz_model: str) -> None:
+    items = db.execute(select(TrendingSnapshotItem).where(TrendingSnapshotItem.snapshot_id == snapshot_id)).scalars().all()
+    for item in items:
+        project = db.get(Project, item.project_id)
+        if not project:
+            continue
+        generate_biz_and_score(db, project, model=biz_model)
+
+
+# ---------------------------------------------------------------------------
+# Job runner with exponential-backoff retry
+# ---------------------------------------------------------------------------
+
+def _run_job_with_retry(job_id: str, work_fn, *args) -> None:
+    """Execute work_fn(db, *args) with up to job.max_retries retries on failure."""
+    # Set job to running
+    init_db = SessionLocal()
+    try:
+        job = init_db.get(Job, job_id)
+        if not job:
+            return
+        max_retries = job.max_retries
+        job.status = "running"
+        job.started_at = datetime.utcnow()
+        init_db.commit()
+    except Exception:
+        init_db.close()
+        return
     finally:
-        db.close()
+        init_db.close()
+
+    last_exc: Optional[Exception] = None
+    succeeded = False
+    attempt = 0
+
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            wait = 2 ** (attempt - 1)  # 1s, 2s, 4s
+            logger.info("job %s retry %d/%d in %ds", job_id, attempt, max_retries, wait)
+            time.sleep(wait)
+
+        attempt_db = SessionLocal()
+        try:
+            work_fn(attempt_db, *args)
+            attempt_db.commit()
+            succeeded = True
+            break
+        except (GithubMetricsError, RateLimitError, Exception) as exc:
+            attempt_db.rollback()
+            last_exc = exc
+            logger.warning("job %s attempt %d/%d failed: %s", job_id, attempt + 1, max_retries + 1, exc)
+        finally:
+            attempt_db.close()
+
+    # Write final status
+    final_db = SessionLocal()
+    try:
+        job = final_db.get(Job, job_id)
+        if job:
+            if succeeded:
+                job.status = "succeeded"
+                job.retry_count = attempt
+                logger.info("job %s succeeded after %d attempt(s)", job_id, attempt + 1)
+            else:
+                job.status = "failed"
+                job.error = str(last_exc) if last_exc else "unknown error"
+                job.retry_count = attempt
+                logger.error("job %s failed after %d attempt(s): %s", job_id, attempt + 1, last_exc)
+            job.finished_at = datetime.utcnow()
+            final_db.commit()
+    finally:
+        final_db.close()
+
+
+# ---------------------------------------------------------------------------
+# Background job runners
+# ---------------------------------------------------------------------------
+
+def run_snapshot_fetch_job(job_id: str, since: str, language: str, spoken: Optional[str], snapshot_date: date) -> None:
+    _run_job_with_retry(job_id, _do_snapshot_fetch, since, language, spoken, snapshot_date)
 
 
 def run_metrics_refresh_job(job_id: str, project_id: str, metric_date: date) -> None:
-    db = SessionLocal()
-    try:
-        job = db.get(Job, job_id)
-        if not job:
-            return
-        job.status = "running"
-        job.started_at = datetime.utcnow()
-        db.commit()
-
-        project = db.get(Project, project_id)
-        if not project:
-            raise ValueError(f"project {project_id} not found")
-        refresh_metrics_for_project(db, project, metric_date)
-
-        job.status = "succeeded"
-        job.finished_at = datetime.utcnow()
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        job = db.get(Job, job_id)
-        if job:
-            job.status = "failed"
-            job.error = str(exc)
-            job.finished_at = datetime.utcnow()
-            db.commit()
-    finally:
-        db.close()
+    _run_job_with_retry(job_id, _do_metrics_refresh, project_id, metric_date)
 
 
 def run_biz_generate_job(job_id: str, project_id: str, model: str) -> None:
-    db = SessionLocal()
-    try:
-        job = db.get(Job, job_id)
-        if not job:
-            return
-        job.status = "running"
-        job.started_at = datetime.utcnow()
-        db.commit()
-
-        project = db.get(Project, project_id)
-        if not project:
-            raise ValueError(f"project {project_id} not found")
-        generate_biz_and_score(db, project, model=model)
-
-        job.status = "succeeded"
-        job.finished_at = datetime.utcnow()
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        job = db.get(Job, job_id)
-        if job:
-            job.status = "failed"
-            job.error = str(exc)
-            job.finished_at = datetime.utcnow()
-            db.commit()
-    finally:
-        db.close()
+    _run_job_with_retry(job_id, _do_biz_generate, project_id, model)
 
 
 def run_score_batch_job(job_id: str, snapshot_id: str, biz_model: str) -> None:
-    db = SessionLocal()
-    try:
-        job = db.get(Job, job_id)
-        if not job:
-            return
-        job.status = "running"
-        job.started_at = datetime.utcnow()
-        db.commit()
-
-        items = db.execute(select(TrendingSnapshotItem).where(TrendingSnapshotItem.snapshot_id == snapshot_id)).scalars().all()
-        for item in items:
-            project = db.get(Project, item.project_id)
-            if not project:
-                continue
-            generate_biz_and_score(db, project, model=biz_model)
-
-        job.status = "succeeded"
-        job.finished_at = datetime.utcnow()
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        job = db.get(Job, job_id)
-        if job:
-            job.status = "failed"
-            job.error = str(exc)
-            job.finished_at = datetime.utcnow()
-            db.commit()
-    finally:
-        db.close()
+    _run_job_with_retry(job_id, _do_score_batch, snapshot_id, biz_model)
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +444,6 @@ def run_score_batch_job(job_id: str, snapshot_id: str, biz_model: str) -> None:
 
 @app.get("/")
 def health(db: Session = Depends(get_db)) -> dict:
-    import logging
     db_ok = False
     db_error = None
     try:
@@ -405,11 +451,30 @@ def health(db: Session = Depends(get_db)) -> dict:
         db_ok = True
     except Exception as exc:
         db_error = str(exc)
-        logging.error("DB health check failed: %s", exc)
+        logger.error("DB health check failed: %s", exc)
     result: dict = {"name": settings.app_name, "status": "ok", "db": "ok" if db_ok else "error"}
     if db_error:
         result["db_error"] = db_error
     return result
+
+
+@app.get(f"{settings.api_prefix}/jobs/{{job_id}}", response_model=JobDetailResp)
+def get_job(job_id: str, db: Session = Depends(get_db)):
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return JobDetailResp(
+        job_id=job.job_id,
+        job_type=job.job_type,
+        status=job.status,
+        retry_count=job.retry_count,
+        max_retries=job.max_retries,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        error=job.error,
+        payload=job.payload,
+    )
 
 
 @app.get(f"{settings.api_prefix}/trending/snapshots", response_model=SnapshotResp)
@@ -484,7 +549,8 @@ def list_projects(
     q: Optional[str] = None,
     language: Optional[str] = None,
     min_score: Optional[float] = None,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     stmt = select(Project)
@@ -492,11 +558,23 @@ def list_projects(
         stmt = stmt.where(Project.repo_full_name.ilike(f"%{q}%"))
     if language:
         stmt = stmt.where(Project.primary_language == language)
+    if cursor:
+        cursor_ts, cursor_id = _decode_cursor(cursor)
+        stmt = stmt.where(
+            (Project.last_seen_at < cursor_ts)
+            | ((Project.last_seen_at == cursor_ts) & (Project.project_id > cursor_id))
+        )
 
-    projects = db.execute(stmt.order_by(desc(Project.last_seen_at)).limit(limit)).scalars().all()
+    # Fetch one extra to detect if there's a next page
+    projects = db.execute(
+        stmt.order_by(desc(Project.last_seen_at), Project.project_id).limit(limit + 1)
+    ).scalars().all()
+
+    has_more = len(projects) > limit
+    page = projects[:limit]
 
     items: list[ProjectListItem] = []
-    for p in projects:
+    for p in page:
         score = latest_score(db, p.project_id)
         if min_score is not None and (not score or score.total_score < min_score):
             continue
@@ -515,7 +593,13 @@ def list_projects(
                 else None,
             )
         )
-    return ProjectListResp(items=items)
+
+    next_cursor = None
+    if has_more and page:
+        last = page[-1]
+        next_cursor = _encode_cursor(last.last_seen_at, last.project_id)
+
+    return ProjectListResp(items=items, next_cursor=next_cursor)
 
 
 @app.get(f"{settings.api_prefix}/projects/{{project_id}}", response_model=ProjectOut)
