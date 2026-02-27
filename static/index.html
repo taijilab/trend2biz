@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trend2Biz · GitHub Trending Dashboard</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <span class="logo">Trend2Biz</span>
+      <span class="subtitle">GitHub Trending · 商业分析</span>
+    </div>
+    <div class="header-right">
+      <a href="/docs" target="_blank" class="api-link">API Docs</a>
+    </div>
+  </header>
+
+  <div class="controls">
+    <div class="date-nav">
+      <button id="btn-prev" class="nav-btn" title="前一天">&#8249;</button>
+      <input type="date" id="date-input" class="date-input">
+      <button id="btn-next" class="nav-btn" title="后一天">&#8250;</button>
+    </div>
+    <div class="since-group">
+      <select id="since-select" class="since-select">
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+        <option value="monthly">Monthly</option>
+      </select>
+    </div>
+    <button id="btn-fetch" class="fetch-btn" style="display:none">
+      &#9889; 抓取 Trending
+    </button>
+    <button id="btn-refresh" class="refresh-btn" title="刷新">&#8635;</button>
+  </div>
+
+  <div id="status-bar" class="status-bar" style="display:none"></div>
+
+  <div id="content" class="content">
+    <div class="loading-state" id="loading">
+      <div class="spinner"></div>
+      <span>加载中...</span>
+    </div>
+  </div>
+
+  <footer>
+    <span id="footer-info">Trend2Biz · 数据来源 GitHub Trending</span>
+  </footer>
+
+  <script src="/web/app.js"></script>
+</body>
+</html>
