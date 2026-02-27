@@ -107,6 +107,32 @@ def wait_for_server(proc: subprocess.Popen, timeout: int = 20) -> None:
 
 
 # ---------------------------------------------------------------------------
+# DB migration (idempotent)
+# ---------------------------------------------------------------------------
+
+def ensure_db_schema() -> None:
+    """Add missing columns to existing SQLite DB without losing data."""
+    import sqlite3
+    db_path = ROOT / "trend2biz.db"
+    if not db_path.exists():
+        return  # fresh DB — create_all will handle it
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(jobs)")
+    cols = {r[1] for r in cur.fetchall()}
+    migrations = [
+        ("retry_count", "ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0"),
+        ("max_retries",  "ALTER TABLE jobs ADD COLUMN max_retries INTEGER DEFAULT 3"),
+    ]
+    for col, sql in migrations:
+        if col not in cols:
+            cur.execute(sql)
+            print(f"  DB 迁移: jobs.{col} 已补充")
+    conn.commit()
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Job polling
 # ---------------------------------------------------------------------------
 
@@ -165,10 +191,11 @@ def print_project(data: dict) -> None:
 
     if s:
         bd = s.get("breakdown", {})
-        print(f"\n  🏆  评分  {s.get('total', 'N/A'):.1f}/100  [{s.get('grade', '?')}]")
+        print(f"\n  🏆  评分  {s.get('total', 'N/A'):.2f}/10  [{s.get('grade', '?')}]")
         for k, v in bd.items():
-            bar = "█" * int((v or 0) / 10) + "░" * (10 - int((v or 0) / 10))
-            print(f"       {k:<14} {bar} {v}")
+            filled = round(v or 0)
+            bar = "█" * filled + "░" * (10 - filled)
+            print(f"       {k:<14} {bar} {v:.2f}")
 
     print(f"  {'─'*58}")
 
@@ -195,6 +222,7 @@ def main() -> None:
 
     # ── Step 1: 启动服务 ──────────────────────────────────────────────────
     step(1, "启动 API 服务器")
+    ensure_db_schema()
     proc = start_server(env)
     wait_for_server(proc)
     ok(f"Server 就绪  http://127.0.0.1:{SERVER_PORT}")
