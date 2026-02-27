@@ -11,6 +11,7 @@ from typing import Optional
 
 from dateutil.parser import isoparse
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import and_, desc, select, text
 from sqlalchemy.exc import IntegrityError
@@ -449,6 +450,11 @@ def run_score_batch_job(job_id: str, snapshot_id: str, biz_model: str) -> None:
 # ---------------------------------------------------------------------------
 
 @app.get("/")
+def root() -> RedirectResponse:
+    return RedirectResponse(url="/web/", status_code=302)
+
+
+@app.get("/health")
 def health(db: Session = Depends(get_db)) -> dict:
     db_ok = False
     db_error = None
