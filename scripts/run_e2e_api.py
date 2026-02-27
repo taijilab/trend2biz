@@ -4,34 +4,23 @@ Trend2Biz 一键端到端 API 脚本
 使用 GitHub REST API 采集真实指标
 
 用法:
-  python scripts/run_e2e_api.py                     # 无 token，60 req/h 限速
-  python scripts/run_e2e_api.py --token ghp_xxx      # 带 token，5000 req/h
-  python scripts/run_e2e_api.py --token ghp_xxx --lang python --since weekly
+  python scripts/run_e2e_api.py                     # 交互式：先看榜单，再选分析
+  python scripts/run_e2e_api.py --top 3             # 直接分析前 3 名，不询问
+  python scripts/run_e2e_api.py --lang python --since weekly
 
-流程:
-  1. 启动 uvicorn（后台）
-  2. POST /trending/snapshots:fetch  → 抓 GitHub Trending
-  3. 等 job succeeded
-  4. GET  /projects                  → 取第一个 project_id
-  5. POST /projects/{id}/metrics:refresh → GitHub REST API 拉指标
-  6. 等 job succeeded
-  7. POST /projects/{id}/biz-profiles:generate → 生成商业分析 + 评分
-  8. 等 job succeeded
-  9. GET  /projects/{id}             → 打印最终结果
-  10. 关闭 server
+两阶段流程:
+  阶段一  快速列出今日 Trending 完整榜单（秒出）
+  阶段二  选择哪些项目拉 GitHub 指标 + 商业评分
 """
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import signal
 import subprocess
 import sys
 import time
 import pathlib
 
-# 确保 project root 在 path 里
 ROOT = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -40,16 +29,19 @@ import httpx
 BASE = "http://127.0.0.1:8765/api/v1"
 HEALTH = "http://127.0.0.1:8765"
 SERVER_PORT = 8765
-POLL_INTERVAL = 1.5   # 秒
-POLL_TIMEOUT = 120    # 最多等 2 分钟
+POLL_INTERVAL = 1.5
+POLL_TIMEOUT = 120
 
 SEP = "━" * 62
+LANG_ICON = {
+    "Python": "🐍", "TypeScript": "🟦", "JavaScript": "🟨",
+    "Go": "🐹", "Rust": "🦀", "Java": "☕", "C++": "⚙️",
+    "C": "⚙️", "Ruby": "💎", "Swift": "🍎", "Kotlin": "🟪",
+}
 
 
 def step(n: int, title: str) -> None:
-    print(f"\n{SEP}")
-    print(f"  步骤 {n}: {title}")
-    print(SEP)
+    print(f"\n{SEP}\n  步骤 {n}: {title}\n{SEP}")
 
 
 def ok(msg: str) -> None:
@@ -72,33 +64,22 @@ def fail(msg: str, proc=None) -> None:
 # ---------------------------------------------------------------------------
 
 def start_server(env: dict) -> subprocess.Popen:
-    """Start uvicorn in background, return the process."""
-    cmd = [
-        sys.executable, "-m", "uvicorn",
-        "app.main:app",
-        "--port", str(SERVER_PORT),
-        "--log-level", "warning",
-    ]
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(ROOT),
-        env={**os.environ, **env},
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+    cmd = [sys.executable, "-m", "uvicorn", "app.main:app",
+           "--port", str(SERVER_PORT), "--log-level", "warning"]
+    return subprocess.Popen(
+        cmd, cwd=str(ROOT), env={**os.environ, **env},
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
     )
-    return proc
 
 
 def wait_for_server(proc: subprocess.Popen, timeout: int = 20) -> None:
-    """Poll /ping until server is up or timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc.poll() is not None:
-            output = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
-            fail(f"Server process exited early:\n{output}")
+            out = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+            fail(f"Server exited early:\n{out}")
         try:
-            r = httpx.get(f"{HEALTH}/ping", timeout=2)
-            if r.status_code == 200:
+            if httpx.get(f"{HEALTH}/ping", timeout=2).status_code == 200:
                 return
         except httpx.RequestError:
             pass
@@ -111,20 +92,18 @@ def wait_for_server(proc: subprocess.Popen, timeout: int = 20) -> None:
 # ---------------------------------------------------------------------------
 
 def ensure_db_schema() -> None:
-    """Add missing columns to existing SQLite DB without losing data."""
     import sqlite3
     db_path = ROOT / "trend2biz.db"
     if not db_path.exists():
-        return  # fresh DB — create_all will handle it
+        return
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(jobs)")
     cols = {r[1] for r in cur.fetchall()}
-    migrations = [
+    for col, sql in [
         ("retry_count", "ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0"),
         ("max_retries",  "ALTER TABLE jobs ADD COLUMN max_retries INTEGER DEFAULT 3"),
-    ]
-    for col, sql in migrations:
+    ]:
         if col not in cols:
             cur.execute(sql)
             print(f"  DB 迁移: jobs.{col} 已补充")
@@ -137,7 +116,6 @@ def ensure_db_schema() -> None:
 # ---------------------------------------------------------------------------
 
 def poll_job(job_id: str, proc: subprocess.Popen, label: str) -> dict:
-    """Poll GET /jobs/{job_id} until status is succeeded or failed."""
     deadline = time.time() + POLL_TIMEOUT
     dots = 0
     while time.time() < deadline:
@@ -147,12 +125,11 @@ def poll_job(job_id: str, proc: subprocess.Popen, label: str) -> dict:
         job = r.json()
         status = job.get("status")
         if status == "succeeded":
-            print()  # newline after dots
+            print()
             return job
         if status == "failed":
             print()
             fail(f"{label} job failed: {job.get('error', '(no detail)')}", proc)
-        # still running
         print(".", end="", flush=True)
         dots += 1
         if dots % 40 == 0:
@@ -162,8 +139,88 @@ def poll_job(job_id: str, proc: subprocess.Popen, label: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Pretty print
+# Phase 1: print trending list
 # ---------------------------------------------------------------------------
+
+def print_trending_list(items: list[dict], snapshot_items: list[dict]) -> None:
+    """Print ranked trending list with stars delta."""
+    # Build rank→stars_delta map from snapshot
+    delta_map: dict[str, int | None] = {
+        si["repo_full_name"]: si.get("stars_delta_window")
+        for si in snapshot_items
+    }
+    rank_map: dict[str, int] = {
+        si["repo_full_name"]: si.get("rank", 0)
+        for si in snapshot_items
+    }
+
+    # Sort items by rank from snapshot
+    sorted_items = sorted(items, key=lambda x: rank_map.get(x["repo_full_name"], 999))
+
+    print(f"\n  {'排名':<4}  {'项目':<42}  {'语言':<12}  {'今日新增⭐'}")
+    print(f"  {'─'*4}  {'─'*42}  {'─'*12}  {'─'*10}")
+    for item in sorted_items:
+        repo = item["repo_full_name"]
+        rank = rank_map.get(repo, "?")
+        lang = item.get("primary_language") or "—"
+        icon = LANG_ICON.get(lang, "  ")
+        delta = delta_map.get(repo)
+        delta_str = f"+{delta}" if delta else "—"
+        print(f"  #{rank:<3}  {repo:<42}  {icon} {lang:<10}  {delta_str}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: parse user selection
+# ---------------------------------------------------------------------------
+
+def parse_selection(raw: str, max_rank: int) -> list[int]:
+    """Parse '1,3,5' or '1-5' or 'all' into a list of ranks."""
+    raw = raw.strip().lower()
+    if not raw or raw == "all":
+        return list(range(1, max_rank + 1))
+    ranks = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if "-" in part:
+            a, _, b = part.partition("-")
+            try:
+                ranks.update(range(int(a), int(b) + 1))
+            except ValueError:
+                pass
+        else:
+            try:
+                ranks.add(int(part))
+            except ValueError:
+                pass
+    return sorted(r for r in ranks if 1 <= r <= max_rank)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: analyze selected projects
+# ---------------------------------------------------------------------------
+
+def analyze_project(pid: str, repo: str, proc: subprocess.Popen, step_base: int) -> None:
+    step(step_base, f"GitHub REST API 拉指标：{repo}")
+    r = httpx.post(f"{BASE}/projects/{pid}/metrics:refresh", timeout=15)
+    if r.status_code != 202:
+        fail(f"metrics refresh 失败: {r.text}", proc)
+    poll_job(r.json()["job_id"], proc, "metrics_refresh")
+    ok("指标采集完成")
+
+    step(step_base + 1, f"生成商业分析 + 评分：{repo}")
+    r = httpx.post(f"{BASE}/projects/{pid}/biz-profiles:generate",
+                   json={"model": "rule-v1"}, timeout=15)
+    if r.status_code != 202:
+        fail(f"biz generate 失败: {r.text}", proc)
+    poll_job(r.json()["job_id"], proc, "biz_generate")
+    ok("分析完成")
+
+    step(step_base + 2, f"最终结果：{repo}")
+    r = httpx.get(f"{BASE}/projects/{pid}", timeout=10)
+    if r.status_code != 200:
+        fail(f"project detail 失败: {r.text}", proc)
+    print_project(r.json())
+
 
 def print_project(data: dict) -> None:
     p = data.get("project", {})
@@ -208,11 +265,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Trend2Biz 一键端到端 API 脚本")
     parser.add_argument("--token", default="", help="GitHub Personal Access Token（可选）")
     parser.add_argument("--lang", default="all", help="语言过滤，默认 all")
-    parser.add_argument("--since", default="daily", choices=["daily", "weekly", "monthly"], help="时间窗口")
-    parser.add_argument("--top", type=int, default=1, help="对前 N 个项目拉指标+分析，默认 1")
+    parser.add_argument("--since", default="daily",
+                        choices=["daily", "weekly", "monthly"], help="时间窗口")
+    parser.add_argument("--top", type=int, default=0,
+                        help="直接分析前 N 名，跳过交互（0 = 交互式选择）")
     args = parser.parse_args()
 
-    # 优先级: --token 参数 > 环境变量 > .env 文件
+    # 读取 token：--token > 环境变量 > .env
     if not args.token and not os.environ.get("GITHUB_TOKEN"):
         env_file = ROOT / ".env"
         if env_file.exists():
@@ -229,7 +288,7 @@ def main() -> None:
     else:
         warn("未设置 GITHUB_TOKEN，GitHub API 限速 60 req/h")
 
-    # ── Step 1: 启动服务 ──────────────────────────────────────────────────
+    # ── 启动服务 ────────────────────────────────────────────────────────────
     step(1, "启动 API 服务器")
     ensure_db_schema()
     proc = start_server(env)
@@ -237,68 +296,70 @@ def main() -> None:
     ok(f"Server 就绪  http://127.0.0.1:{SERVER_PORT}")
 
     try:
-        # ── Step 2: 抓 Trending ──────────────────────────────────────────
+        # ── 阶段一：抓 Trending 榜单 ─────────────────────────────────────
         step(2, f"抓取 GitHub Trending（{args.since} / {args.lang}）")
-        r = httpx.post(
-            f"{BASE}/trending/snapshots:fetch",
-            json={"since": args.since, "language": args.lang},
-            timeout=15,
-        )
+        r = httpx.post(f"{BASE}/trending/snapshots:fetch",
+                       json={"since": args.since, "language": args.lang}, timeout=15)
         if r.status_code != 202:
             fail(f"fetch snapshot 失败 {r.status_code}: {r.text}", proc)
-        job_id = r.json()["job_id"]
-        ok(f"job_id = {job_id}，等待完成...")
-        poll_job(job_id, proc, "trending_fetch")
+        ok(f"job_id = {r.json()['job_id']}，等待完成...")
+        poll_job(r.json()["job_id"], proc, "trending_fetch")
         ok("Trending 抓取完成")
 
-        # ── Step 3: 取项目列表 ──────────────────────────────────────────
-        step(3, "获取已入库项目列表")
-        r = httpx.get(f"{BASE}/projects", timeout=10)
+        # 获取快照中的排名数据
+        from datetime import date
+        snap_r = httpx.get(f"{BASE}/trending/snapshots",
+                           params={"since": args.since, "language": args.lang,
+                                   "date": str(date.today()), "limit": 50}, timeout=10)
+        snapshot_items = snap_r.json().get("items", []) if snap_r.status_code == 200 else []
+
+        # 获取项目列表（含 project_id）
+        r = httpx.get(f"{BASE}/projects", params={"limit": 50}, timeout=10)
         if r.status_code != 200:
             fail(f"list projects 失败: {r.text}", proc)
-        items = r.json().get("items", [])
-        if not items:
+        all_items = r.json().get("items", [])
+        if not all_items:
             fail("没有入库的项目，请检查 Trending 解析结果", proc)
-        ok(f"共 {len(items)} 个项目")
-        top_items = items[: args.top]
-        for i, it in enumerate(top_items, 1):
-            print(f"     #{i}  {it['repo_full_name']}")
 
-        # ── Steps 4–6: 对每个项目跑完整链路 ─────────────────────────────
-        for idx, item in enumerate(top_items, 1):
-            pid = item["project_id"]
-            repo = item["repo_full_name"]
+        # 构建 rank→project 映射
+        rank_map = {si.get("rank"): si["repo_full_name"] for si in snapshot_items}
+        name_to_item = {it["repo_full_name"]: it for it in all_items}
+        max_rank = max((si.get("rank", 0) for si in snapshot_items), default=len(all_items))
 
-            # Step 4: metrics:refresh
-            step(4 + (idx - 1) * 3, f"GitHub REST API 拉指标：{repo}")
-            r = httpx.post(f"{BASE}/projects/{pid}/metrics:refresh", timeout=15)
-            if r.status_code != 202:
-                fail(f"metrics refresh 失败: {r.text}", proc)
-            job_id = r.json()["job_id"]
-            ok(f"job_id = {job_id}，等待完成...")
-            poll_job(job_id, proc, "metrics_refresh")
-            ok("指标采集完成")
+        # ── 显示完整榜单 ────────────────────────────────────────────────
+        step(3, f"今日 GitHub Trending 榜单（共 {max_rank} 个）")
+        print_trending_list(all_items, snapshot_items)
 
-            # Step 5: biz-profiles:generate
-            step(5 + (idx - 1) * 3, f"生成商业分析 + 评分：{repo}")
-            r = httpx.post(
-                f"{BASE}/projects/{pid}/biz-profiles:generate",
-                json={"model": "rule-v1"},
-                timeout=15,
-            )
-            if r.status_code != 202:
-                fail(f"biz generate 失败: {r.text}", proc)
-            job_id = r.json()["job_id"]
-            ok(f"job_id = {job_id}，等待完成...")
-            poll_job(job_id, proc, "biz_generate")
-            ok("分析完成")
+        # ── 阶段二：选择要深入分析的项目 ──────────────────────────────
+        if args.top > 0:
+            selected_ranks = list(range(1, min(args.top, max_rank) + 1))
+            print(f"\n  → 自动选择前 {args.top} 名")
+        else:
+            print(f"\n  请输入要分析的排名（例：1  或  1,3,5  或  1-3  或  all）")
+            print(f"  直接回车 = 分析第 1 名", end="")
+            try:
+                raw = input("  > ").strip()
+            except (EOFError, KeyboardInterrupt):
+                raw = "1"
+            selected_ranks = parse_selection(raw or "1", max_rank)
 
-            # Step 6: 打印结果
-            step(6 + (idx - 1) * 3, f"最终结果：{repo}")
-            r = httpx.get(f"{BASE}/projects/{pid}", timeout=10)
-            if r.status_code != 200:
-                fail(f"project detail 失败: {r.text}", proc)
-            print_project(r.json())
+        if not selected_ranks:
+            fail("没有选择任何项目", proc)
+
+        print(f"\n  将分析：{', '.join(f'#{r}' for r in selected_ranks)}")
+
+        # ── 对选中项目跑完整分析 ─────────────────────────────────────
+        for seq, rank in enumerate(selected_ranks):
+            repo_name = rank_map.get(rank)
+            if not repo_name:
+                warn(f"排名 #{rank} 未找到对应项目，跳过")
+                continue
+            item = name_to_item.get(repo_name)
+            if not item:
+                warn(f"{repo_name} 未在项目库中，跳过")
+                continue
+            analyze_project(item["project_id"], repo_name, proc,
+                            step_base=4 + seq * 3)
 
     finally:
         proc.terminate()
