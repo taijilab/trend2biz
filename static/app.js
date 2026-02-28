@@ -284,9 +284,12 @@ function buildTableHtml(rowPairs) {
         <td class="col-rank"><div class="cell"><span class="rank-num">${row.rank}</span></div></td>
         <td class="col-repo">
           <div class="cell" style="flex-direction:column;align-items:flex-start;gap:2px;">
-            <a class="repo-name" href="https://github.com/${row.repo_full_name}" target="_blank">
-              <span class="repo-owner">${owner}/</span>${name}
-            </a>
+            <div class="repo-name-row">
+              <a class="repo-name" href="https://github.com/${row.repo_full_name}" target="_blank">
+                <span class="repo-owner">${owner}/</span>${name}
+              </a>
+              ${lang ? `<span class="lang-pill lang-mobile-only">${langDotHtml(lang)}${lang}</span>` : ''}
+            </div>
             ${descText ? `<div class="repo-desc">${escHtml(descText)}</div>` : ''}
           </div>
         </td>
@@ -299,7 +302,10 @@ function buildTableHtml(rowPairs) {
           </div>
         </td>
         <td class="col-stars">
-          <div class="cell"><span class="stars-delta ${deltaClass}">${delta}</span></div>
+          <div class="cell">
+            <span class="stars-delta ${deltaClass}">${delta}</span>
+            <span class="stars-total-mobile">&#9733; ${totalStars}</span>
+          </div>
         </td>
         <td class="col-stars-total">
           <div class="cell"><span class="stars-total">${totalStars}</span></div>
