@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -20,6 +20,10 @@ _db_url = _normalize_url(settings.database_url)
 if _db_url.startswith("sqlite"):
     connect_args = {"check_same_thread": False, "timeout": 30}
     engine = create_engine(_db_url, future=True, connect_args=connect_args)
+    # WAL mode: readers never block writers; reduces "database is locked" errors
+    with engine.connect() as _conn:
+        _conn.execute(text("PRAGMA journal_mode=WAL"))
+        _conn.execute(text("PRAGMA synchronous=NORMAL"))
 else:
     # Use NullPool for serverless environments (Vercel): no persistent connection pool
     engine = create_engine(_db_url, future=True, poolclass=NullPool)
