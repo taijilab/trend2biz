@@ -1213,7 +1213,24 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     desc_zh = expl.get("description_zh") if biz else None
     bd_pitch = expl.get("bd_pitch") if biz else None
 
-    # Star history for chart
+    # Fallback Chinese description from biz profile when LLM didn't run
+    if not desc_zh and biz:
+        _cat_cn = {
+            "agent": "AI 智能体框架", "developer-tools": "开发者工具",
+            "security": "安全工具", "data": "数据处理工具",
+            "observability": "可观测性平台", "fintech": "金融科技工具",
+            "edu-tech": "教育科技产品", "biotech": "生命科学工具",
+            "infra": "基础设施", "ecommerce": "电商工具",
+        }.get(biz.category or "", biz.category or "开源项目")
+        _sc = "、".join((biz.scenarios or [])[:2]) or "多种应用场景"
+        _mn = "、".join((biz.monetization_candidates or [])[:2]) or "商业授权"
+        desc_zh = (
+            f"这是一款{_cat_cn}，面向 {biz.buyer or '技术团队'}，主要应用于{_sc}。"
+            f"潜在变现路径包括{_mn}。"
+            f"（以上为规则推断，使用 AI 模型分析后可获得更精准的中文解读）"
+        )
+
+    # Star history for chart — primary: RepoMetricDaily; fallback: TrendingSnapshotItem
     import json as _json
     metrics_rows = db.execute(
         select(RepoMetricDaily)
@@ -1222,6 +1239,18 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     ).scalars().all()
     star_dates = [str(r.metric_date) for r in metrics_rows if r.stars is not None]
     star_values = [r.stars for r in metrics_rows if r.stars is not None]
+
+    # Fallback: use trending snapshot stars_total_hint if no metric rows
+    if not star_dates:
+        trending_rows = db.execute(
+            select(TrendingSnapshotItem, TrendingSnapshot.snapshot_date)
+            .join(TrendingSnapshot, TrendingSnapshotItem.snapshot_id == TrendingSnapshot.snapshot_id)
+            .where(TrendingSnapshotItem.project_id == project.project_id)
+            .where(TrendingSnapshotItem.stars_total_hint.isnot(None))
+            .order_by(TrendingSnapshot.snapshot_date.asc())
+        ).all()
+        star_dates = [str(row[1]) for row in trending_rows]
+        star_values = [row[0].stars_total_hint for row in trending_rows]
 
     grade = score.grade if score else "N/A"
     total_score = score.total_score if score else None
@@ -1270,16 +1299,51 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
 
     # Sales motion & confidence notes
     _motion_desc = {
-        "PLG": "产品驱动增长（Product-Led Growth）— 用户自助发现、体验并付费，无需大量销售介入；适合开发者工具、基础设施、AI 框架等面向技术受众的产品",
-        "Enterprise": "企业直销 — 依靠专职销售团队主动拓展企业合同；适合安全、合规、生命科学等需要深度定制和采购审批的场景",
+        "PLG": "Product-Led Growth — users discover, try, and pay through the product itself, with no heavy sales involvement. Best for developer tools, infrastructure, and AI frameworks.",
+        "Enterprise": "Enterprise Sales — a dedicated sales team closes contracts with large organizations. Best for security, compliance, and life sciences requiring deep customization.",
     }.get(biz.sales_motion if biz else "", "")
-    _confidence_note = "置信度反映规则匹配的确定性：65% 为基于项目类别关键词的初步推断，经 AI 精细分析后可提升至 80%+"
-    motion_note_html = (
-        f'<p style="font-size:11px;color:#94a3b8;margin:8px 0 0;line-height:1.6;border-top:1px solid #f1f5f9;padding-top:8px">'
-        f'<strong>运动说明：</strong>{_motion_desc}</p>'
-        f'<p style="font-size:11px;color:#94a3b8;margin:4px 0 0;line-height:1.6">'
-        f'<strong>置信度说明：</strong>{_confidence_note}</p>'
-    ) if biz else ""
+    _motion_desc_zh = {
+        "PLG": "产品驱动增长 — 用户自助发现、体验并付费，无需大量销售介入",
+        "Enterprise": "企业直销 — 依靠专职销售团队拓展企业合同",
+    }.get(biz.sales_motion if biz else "", "")
+
+    _buyer_val = biz.buyer if biz else "N/A"
+    _motion_val = biz.sales_motion if biz else "N/A"
+    _conf_val = f"{biz.confidence:.0%}" if biz and biz.confidence else "N/A"
+
+    biz_meta_html = f"""
+    <div style="display:grid;gap:10px;margin-top:4px">
+      <div style="display:grid;grid-template-columns:120px 1fr;gap:6px;align-items:start;border-bottom:1px solid #f1f5f9;padding-bottom:8px">
+        <div>
+          <div style="font-size:13px;font-weight:600;color:#1e293b">买方</div>
+          <div style="font-size:10px;color:#94a3b8;letter-spacing:.03em">Buyer</div>
+        </div>
+        <div>
+          <div style="font-size:14px;color:#0f3460;font-weight:600">{_buyer_val}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px;line-height:1.5">The target buyer persona — who would sign the contract or make the purchase decision.</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:120px 1fr;gap:6px;align-items:start;border-bottom:1px solid #f1f5f9;padding-bottom:8px">
+        <div>
+          <div style="font-size:13px;font-weight:600;color:#1e293b">动力</div>
+          <div style="font-size:10px;color:#94a3b8;letter-spacing:.03em">Motion</div>
+        </div>
+        <div>
+          <div style="font-size:14px;color:#0f3460;font-weight:600">{_motion_val} <span style="font-size:11px;color:#64748b;font-weight:400">· {_motion_desc_zh}</span></div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px;line-height:1.5">{_motion_desc}</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:120px 1fr;gap:6px;align-items:start">
+        <div>
+          <div style="font-size:13px;font-weight:600;color:#1e293b">置信度</div>
+          <div style="font-size:10px;color:#94a3b8;letter-spacing:.03em">Confidence</div>
+        </div>
+        <div>
+          <div style="font-size:14px;color:#0f3460;font-weight:600">{_conf_val}</div>
+          <div style="font-size:11px;color:#64748b;margin-top:2px;line-height:1.5">How confident the system is in this business profile inference. 65% = rule-based keyword match on repo name &amp; description. Re-run with AI model for higher accuracy.</div>
+        </div>
+      </div>
+    </div>""" if biz else ""
 
     # Star history chart section
     star_chart_section = (
@@ -1371,17 +1435,12 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
   </div>
 
   <div class="card">
-    <h2>商业画像</h2>
-    <div class="tags" style="margin-bottom:10px">
+    <h2>商业画像 <span style="font-size:10px;font-weight:400;color:#94a3b8;text-transform:none;letter-spacing:0">Business Profile</span></h2>
+    <div class="tags" style="margin-bottom:14px">
       <span class="tag" style="background:#ede9fe;color:#5b21b6">{biz.category if biz else "N/A"}</span>
       {biz_tags_html}
     </div>
-    <p style="font-size:13px;color:#475569;margin:0">
-      <strong>买方：</strong>{biz.buyer if biz else "N/A"} &nbsp;·&nbsp;
-      <strong>运动：</strong>{biz.sales_motion if biz else "N/A"} &nbsp;·&nbsp;
-      <strong>置信度：</strong>{f"{biz.confidence:.0%}" if biz and biz.confidence else "N/A"}
-    </p>
-    {motion_note_html}
+    {biz_meta_html}
   </div>
 
   {bd_section}
