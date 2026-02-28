@@ -155,7 +155,11 @@ def ping() -> dict:
 
 @app.get("/api/v1/version")
 def version() -> dict:
-    return {"version": APP_VERSION, "build": APP_BUILD}
+    return {
+        "version": APP_VERSION,
+        "build": APP_BUILD,
+        "server_has_key": bool(settings.anthropic_api_key),
+    }
 
 
 # ---------------------------------------------------------------------------

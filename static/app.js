@@ -12,6 +12,7 @@ let currentSince = 'daily';
 let currentLanguage = '';   // '' = all languages (client-side filter)
 let tableRows = [];   // merged rows
 let _pendingAnalysisRowIdx = null;   // set when warning modal opens with a pending row
+let _serverHasKey = false;           // populated from /api/v1/version on init
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 
@@ -170,7 +171,7 @@ async function autoAnalyzeAll() {
     .filter(({ row }) => !row.analyzed && row.project_id);
 
   const s = getSettings();
-  if (queue.length && (s.ai_model || 'rule-v1') === 'llm-v1' && !s.ai_api_key) {
+  if (queue.length && (s.ai_model || 'rule-v1') === 'llm-v1' && !s.ai_api_key && !_serverHasKey) {
     setStatus('提示：未配置 API Key，无法使用 llm-v1 分析。点击 ⚙ 在设置中配置。', 'info');
     setTimeout(clearStatus, 7000);
   }
@@ -382,7 +383,7 @@ window.startAnalysis = function(rowIdx) {
   const row = tableRows[rowIdx];
   if (!row || row._analyzing || !row.project_id) return;
   const s = getSettings();
-  if ((s.ai_model || 'rule-v1') === 'llm-v1' && !s.ai_api_key) {
+  if ((s.ai_model || 'rule-v1') === 'llm-v1' && !s.ai_api_key && !_serverHasKey) {
     _pendingAnalysisRowIdx = rowIdx;
     openSettingsModal(true);   // open settings with "no key" warning
     return;
@@ -542,11 +543,12 @@ function init() {
   // Initial load
   loadDashboard(currentDate, currentSince);
 
-  // Version badge
+  // Version badge + server key status
   apiFetch('/api/v1/version').then(r => r.ok ? r.json() : null).then(data => {
     if (!data) return;
     const el = document.getElementById('version-badge');
     if (el) el.textContent = `v${data.version} · ${data.build}`;
+    _serverHasKey = !!data.server_has_key;
   }).catch(() => {});
 }
 
