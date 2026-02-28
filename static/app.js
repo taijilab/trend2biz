@@ -169,8 +169,9 @@ async function autoAnalyzeAll() {
     .map((row, idx) => ({ row, idx }))
     .filter(({ row }) => !row.analyzed && row.project_id);
 
-  if (queue.length && !getSettings().ai_api_key) {
-    setStatus('提示：未配置 API Key，将使用免费翻译（质量较低）。点击 ⚙ 在设置中配置。', 'info');
+  const s = getSettings();
+  if (queue.length && (s.ai_model || 'rule-v1') === 'llm-v1' && !s.ai_api_key) {
+    setStatus('提示：未配置 API Key，无法使用 llm-v1 分析。点击 ⚙ 在设置中配置。', 'info');
     setTimeout(clearStatus, 7000);
   }
 
