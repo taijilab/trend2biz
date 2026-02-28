@@ -136,8 +136,8 @@ async function analyzeProject(projectId, rowIdx) {
 
     // Step 2: biz:generate (pass API key/provider from settings if configured)
     renderAnalysisCell(rowIdx, 'biz');
-    const { ai_api_key, ai_provider } = getSettings();
-    const bizPayload = { model: 'rule-v1' };
+    const { ai_api_key, ai_provider, ai_model } = getSettings();
+    const bizPayload = { model: ai_model || 'rule-v1' };
     if (ai_api_key) { bizPayload.api_key = ai_api_key; bizPayload.provider = ai_provider || 'anthropic'; }
     const r2 = await apiFetch(`${API}/projects/${projectId}/biz-profiles:generate`, {
       method: 'POST',
@@ -552,6 +552,7 @@ function saveSettings(s) {
 
 function openSettingsModal(warnNoKey = false) {
   const s = getSettings();
+  document.getElementById('settings-model').value = s.ai_model || 'rule-v1';
   document.getElementById('settings-provider').value = s.ai_provider || 'anthropic';
   document.getElementById('settings-api-key').value = s.ai_api_key || '';
   document.getElementById('settings-auto-fetch').checked = !!s.auto_fetch;
@@ -566,6 +567,7 @@ function closeSettingsModal() {
 
 function saveSettingsModal() {
   const s = {
+    ai_model:    document.getElementById('settings-model').value,
     ai_provider: document.getElementById('settings-provider').value,
     ai_api_key:  document.getElementById('settings-api-key').value.trim(),
     auto_fetch:  document.getElementById('settings-auto-fetch').checked,
@@ -598,6 +600,7 @@ function openKeywordModal(keyword) {
       const owner = parts[0] || '';
       const name = parts[1] || r.repo_full_name;
       const desc = (r.biz && r.biz.description_zh) || r.description || '';
+      const bdPitch = (r.biz && r.biz.bd_pitch) || '';
       const grade = r.score ? r.score.grade : null;
       const stars = r.stars_total != null ? r.stars_total.toLocaleString() : '—';
       return `<div class="kw-project-row">
@@ -607,6 +610,7 @@ function openKeywordModal(keyword) {
             <span class="repo-owner">${escHtml(owner)}/</span>${escHtml(name)}
           </a>
           ${desc ? `<div class="kw-desc">${escHtml(desc)}</div>` : ''}
+          ${bdPitch ? `<div class="kw-bd-pitch">&#128172; ${escHtml(bdPitch)}</div>` : ''}
         </div>
         <span class="kw-stars">&#9733; ${stars}</span>
       </div>`;

@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import pathlib
+import re
 import sys
 import time
 
@@ -378,6 +379,137 @@ def enrich_description_zh(
     return None
 
 
+def generate_biz_profile_llm(
+    repo_name: str,
+    description: Optional[str],
+    readme: Optional[str],
+    language: Optional[str],
+    api_key: str,
+    provider: str,
+) -> Optional[dict]:
+    """Call an LLM to generate a complete structured biz profile (llm-v1).
+
+    Returns a dict compatible with infer_biz_profile() output, or None on failure.
+    The LLM response is expected to be a JSON object with all biz profile fields
+    plus description_zh and bd_pitch stored in explanations.
+    """
+    context_parts = []
+    if description:
+        context_parts.append(f"GitHub 简介：{description}")
+    if readme:
+        context_parts.append(f"README（节选）：\n{readme[:2000]}")
+    if language:
+        context_parts.append(f"主要编程语言：{language}")
+    context = "\n\n".join(context_parts) if context_parts else "（无描述）"
+
+    categories = (
+        "agent / security / data-platform / observability / fintech / biotech / "
+        "robotics-iot / edu-tech / media-tech / low-code / enterprise-saas / "
+        "infra / devops / devtools / developer-tools"
+    )
+
+    prompt = (
+        f"你是一名开源商业化分析师。请根据以下 GitHub 项目信息，生成结构化商业分析报告。\n\n"
+        f"项目：{repo_name}\n{context}\n\n"
+        f"请严格只返回以下 JSON 对象（不加 markdown 代码块，不加任何额外文字）：\n"
+        f'{{\n'
+        f'  "category": "从以下选一：{categories}",\n'
+        f'  "scenarios": ["2-3个中文使用场景"],\n'
+        f'  "value_props": ["2-3个核心价值主张"],\n'
+        f'  "delivery_forms": ["交付形式，可选 OSS/SaaS/SDK/API/On-premise，选1-3个"],\n'
+        f'  "monetization_candidates": ["1-3个变现路径"],\n'
+        f'  "buyer": "目标购买决策者（中文）",\n'
+        f'  "sales_motion": "PLG 或 Enterprise",\n'
+        f'  "confidence": 0.0到1.0之间的置信度数字,\n'
+        f'  "description_zh": "2-3句中文项目介绍：说清楚是什么、解决什么问题、适合谁用",\n'
+        f'  "bd_pitch": "3句话BD话术：①合作价值主张 ②对方核心痛点 ③我方可提供资源"\n'
+        f'}}'
+    )
+
+    raw: Optional[str] = None
+    if provider == "openrouter":
+        try:
+            r = httpx.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "deepseek/deepseek-chat-v3-0324:free",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 800,
+                },
+                timeout=60,
+            )
+            r.raise_for_status()
+            raw = r.json()["choices"][0]["message"]["content"].strip() or None
+        except Exception as e:
+            logger.warning("OpenRouter llm-v1 call failed for %s: %s", repo_name, e)
+    elif provider == "zhipu":
+        try:
+            r = httpx.post(
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "glm-4-flash",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 800,
+                },
+                timeout=60,
+            )
+            r.raise_for_status()
+            raw = r.json()["choices"][0]["message"]["content"].strip() or None
+        except Exception as e:
+            logger.warning("Zhipu llm-v1 call failed for %s: %s", repo_name, e)
+    else:  # anthropic
+        try:
+            import anthropic  # lazy import
+            client = anthropic.Anthropic(api_key=api_key)
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=800,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = msg.content[0].text.strip() or None
+        except Exception as e:
+            logger.warning("Anthropic llm-v1 call failed for %s: %s", repo_name, e)
+
+    if not raw:
+        return None
+
+    # Parse JSON — handle possible markdown code-block wrapping
+    data: Optional[dict] = None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group())
+            except Exception:
+                pass
+
+    if not data or not isinstance(data.get("category"), str):
+        logger.warning("llm-v1: JSON parse failed for %s, raw=%s", repo_name, raw[:200])
+        return None
+
+    return {
+        "category": data["category"],
+        "user_persona": "AI",
+        "scenarios": data.get("scenarios") or ["通用研发效率"],
+        "value_props": data.get("value_props") or ["效率提升"],
+        "delivery_forms": data.get("delivery_forms") or ["OSS"],
+        "monetization_candidates": data.get("monetization_candidates") or [],
+        "buyer": data.get("buyer", "研发工程师"),
+        "sales_motion": data.get("sales_motion", "PLG"),
+        "confidence": float(data.get("confidence", 0.8)),
+        "explanations": {
+            "method": "llm-v1",
+            "signals": [repo_name, description or ""],
+            "description_zh": data.get("description_zh"),
+            "bd_pitch": data.get("bd_pitch"),
+        },
+    }
+
+
 def generate_biz_and_score(
     db: Session,
     project: Project,
@@ -385,11 +517,29 @@ def generate_biz_and_score(
     api_key: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> tuple[BizProfile, ProjectScore]:
-    biz_data = infer_biz_profile(project.repo_full_name, project.description, project.primary_language)
-    readme = fetch_readme(project.repo_full_name, token=settings.github_token)
-    desc_zh = enrich_description_zh(project.repo_full_name, project.description, readme, api_key=api_key, provider=provider)
-    if desc_zh:
-        biz_data["explanations"]["description_zh"] = desc_zh
+    biz_data: Optional[dict] = None
+
+    if model == "llm-v1" and api_key:
+        readme = fetch_readme(project.repo_full_name, token=settings.github_token)
+        biz_data = generate_biz_profile_llm(
+            repo_name=project.repo_full_name,
+            description=project.description,
+            readme=readme,
+            language=project.primary_language,
+            api_key=api_key,
+            provider=provider or "anthropic",
+        )
+        if not biz_data:
+            logger.warning("llm-v1 failed for %s, falling back to rule-v1", project.repo_full_name)
+            model = "rule-v1"
+
+    if biz_data is None:
+        biz_data = infer_biz_profile(project.repo_full_name, project.description, project.primary_language)
+        readme = fetch_readme(project.repo_full_name, token=settings.github_token)
+        desc_zh = enrich_description_zh(project.repo_full_name, project.description, readme, api_key=api_key, provider=provider)
+        if desc_zh:
+            biz_data["explanations"]["description_zh"] = desc_zh
+
     biz = BizProfile(project_id=project.project_id, model_name=model, **biz_data)
     db.add(biz)
     db.flush()
@@ -704,6 +854,7 @@ def get_trending_snapshots(
         b = biz_by_pid.get(pid) if pid else None
         if not b:
             return None
+        expl = b.explanations or {}
         return {
             "category": b.category,
             "scenarios": b.scenarios,
@@ -713,7 +864,8 @@ def get_trending_snapshots(
             "buyer": b.buyer,
             "sales_motion": b.sales_motion,
             "confidence": b.confidence,
-            "description_zh": b.explanations.get("description_zh") if b.explanations else None,
+            "description_zh": expl.get("description_zh"),
+            "bd_pitch": expl.get("bd_pitch"),
         }
 
     def _item_score(pid: Optional[str]) -> Optional[dict]:
@@ -832,7 +984,8 @@ def list_projects(
                     "category": biz.category,
                     "scenarios": biz.scenarios,
                     "monetization_candidates": biz.monetization_candidates,
-                    "description_zh": biz.explanations.get("description_zh") if biz.explanations else None,
+                    "description_zh": (biz.explanations or {}).get("description_zh"),
+                    "bd_pitch": (biz.explanations or {}).get("bd_pitch"),
                 }
                 if biz
                 else None,
@@ -880,7 +1033,8 @@ def project_detail(project_id: str, db: Session = Depends(get_db)):
             "value_props": biz.value_props,
             "buyer": biz.buyer,
             "monetization_candidates": biz.monetization_candidates,
-            "description_zh": biz.explanations.get("description_zh") if biz.explanations else None,
+            "description_zh": (biz.explanations or {}).get("description_zh"),
+            "bd_pitch": (biz.explanations or {}).get("bd_pitch"),
         }
         if biz
         else None,
@@ -1019,23 +1173,128 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
 
     score = latest_score(db, project.project_id)
     biz = latest_biz(db, project.project_id)
+    expl = (biz.explanations or {}) if biz else {}
+    desc_zh = expl.get("description_zh") if biz else None
+    bd_pitch = expl.get("bd_pitch") if biz else None
+
+    grade = score.grade if score else "N/A"
+    total_score = score.total_score if score else None
+    generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     highlights_html = "".join(f"<li>{h}</li>" for h in (score.highlights or [])) if score else ""
     risks_html = "".join(f"<li>{r}</li>" for r in (score.risks or [])) if score else ""
     followups_html = "".join(f"<li>{f}</li>" for f in (score.followups or [])) if score else ""
 
+    # Score breakdown cells with signal text
+    score_dim_labels = {"market": "市场", "traction": "牵引力", "moat": "护城河", "team": "团队", "monetization": "商业化", "risk": "风险"}
+    score_values = {
+        "market": score.market_score, "traction": score.traction_score,
+        "moat": score.moat_score, "team": score.team_score,
+        "monetization": score.monetization_score, "risk": score.risk_score,
+    } if score else {}
+    signals_text = (score.explanations or {}).get("signals_text", {}) if score else {}
+    score_cells_html = "".join(
+        f'<div class="score-item"><div class="val">{v:.1f}</div>'
+        f'<div class="lbl">{score_dim_labels.get(k, k)}</div>'
+        f'<div class="sig">{signals_text.get(k, "")}</div></div>'
+        for k, v in score_values.items()
+        if v is not None
+    )
+
+    biz_tags_html = ""
+    if biz:
+        for item in (biz.monetization_candidates or [])[:3]:
+            biz_tags_html += f'<span class="tag">{item}</span>'
+        for item in (biz.delivery_forms or [])[:3]:
+            biz_tags_html += f'<span class="tag" style="background:#dcfce7;color:#166534">{item}</span>'
+
+    desc_section = (
+        f'<div class="card"><h2>项目介绍</h2>'
+        f'<div class="desc">{desc_zh}</div></div>'
+    ) if desc_zh else (
+        f'<div class="card"><h2>项目介绍</h2>'
+        f'<p style="color:#374151;font-size:14px">{project.description or ""}</p></div>'
+    ) if project.description else ""
+
+    bd_section = (
+        f'<div class="card"><h2>BD 话术</h2><div class="bd-pitch">{bd_pitch}</div></div>'
+    ) if bd_pitch else ""
+
     html = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>{project.repo_full_name}</title></head>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>{project.repo_full_name} — Trend2Biz 商业分析报告</title>
+  <style>
+    body{{font-family:system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#1a1a2e;background:#f8fafc}}
+    .header{{background:linear-gradient(135deg,#0f3460 0%,#16213e 100%);color:#fff;padding:28px 32px;border-radius:12px;margin-bottom:20px}}
+    .header h1{{margin:0 0 6px;font-size:22px;font-weight:700}}
+    .header .meta{{font-size:13px;opacity:.8}}
+    .card{{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:20px 24px;margin-bottom:16px}}
+    .card h2{{font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin:0 0 12px}}
+    .grade-badge{{display:inline-block;padding:4px 14px;border-radius:20px;font-weight:700;font-size:14px}}
+    .grade-S{{background:#f59e0b;color:#000}}.grade-A{{background:#22c55e;color:#000}}
+    .grade-B{{background:#3b82f6;color:#fff}}.grade-C{{background:#6b7280;color:#fff}}
+    .score-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}
+    .score-item{{text-align:center;padding:10px;background:#f8fafc;border-radius:8px}}
+    .score-item .val{{font-size:22px;font-weight:700;color:#0f3460}}
+    .score-item .lbl{{font-size:11px;color:#64748b;margin-top:3px}}
+    .score-item .sig{{font-size:10px;color:#94a3b8;margin-top:2px;line-height:1.4}}
+    ul{{margin:0;padding-left:18px}}li{{margin-bottom:6px;font-size:14px;line-height:1.6}}
+    .tags{{display:flex;flex-wrap:wrap;gap:8px}}
+    .tag{{padding:3px 10px;border-radius:16px;font-size:12px;background:#e0f2fe;color:#0369a1}}
+    .desc{{font-size:14px;color:#374151;line-height:1.7;background:#f0fdf4;padding:14px 16px;border-radius:8px;border-left:3px solid #22c55e}}
+    .bd-pitch{{font-size:14px;color:#374151;line-height:1.7;background:#fefce8;padding:14px 16px;border-radius:8px;border-left:3px solid #f59e0b}}
+    .two-col{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
+    .footer{{text-align:center;font-size:12px;color:#94a3b8;margin-top:28px}}
+  </style>
+</head>
 <body>
-<h1>{project.repo_full_name}</h1>
-<p><a href="{project.repo_url}">{project.repo_url}</a></p>
-<p>{project.description or ''}</p>
-<h2>评分：{score.total_score if score else 'N/A'} ({score.grade if score else 'N/A'})</h2>
-<h3>商业化分类：{biz.category if biz else 'N/A'}</h3>
-<h3>亮点</h3><ul>{highlights_html}</ul>
-<h3>风险</h3><ul>{risks_html}</ul>
-<h3>追问清单</h3><ul>{followups_html}</ul>
-</body></html>"""
+  <div class="header">
+    <h1>{project.repo_full_name}</h1>
+    <div class="meta">
+      <a href="{project.repo_url}" style="color:#93c5fd">{project.repo_url}</a>
+      &nbsp;·&nbsp; 生成时间：{generated_at}
+    </div>
+  </div>
+
+  {desc_section}
+
+  <div class="card">
+    <h2>评分概览</h2>
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
+      <span class="grade-badge grade-{grade}">{grade}</span>
+      <span style="font-size:28px;font-weight:700;color:#0f3460">{f"{total_score:.1f}" if total_score else "N/A"}</span>
+      <span style="color:#64748b;font-size:14px">/ 10.0</span>
+    </div>
+    <div class="score-grid">{score_cells_html}</div>
+  </div>
+
+  <div class="card">
+    <h2>商业画像</h2>
+    <div class="tags" style="margin-bottom:10px">
+      <span class="tag" style="background:#ede9fe;color:#5b21b6">{biz.category if biz else "N/A"}</span>
+      {biz_tags_html}
+    </div>
+    <p style="font-size:13px;color:#475569;margin:0">
+      <strong>买方：</strong>{biz.buyer if biz else "N/A"} &nbsp;·&nbsp;
+      <strong>运动：</strong>{biz.sales_motion if biz else "N/A"} &nbsp;·&nbsp;
+      <strong>置信度：</strong>{f"{biz.confidence:.0%}" if biz and biz.confidence else "N/A"}
+    </p>
+  </div>
+
+  {bd_section}
+
+  <div class="two-col">
+    <div class="card"><h2>亮点</h2><ul>{highlights_html}</ul></div>
+    <div class="card"><h2>风险</h2><ul>{risks_html}</ul></div>
+  </div>
+
+  <div class="card"><h2>追问清单</h2><ul>{followups_html}</ul></div>
+
+  <div class="footer">Trend2Biz · 数据来源 GitHub Trending · 分析仅供参考</div>
+</body>
+</html>"""
 
     report = Report(project_id=project.project_id, score_id=score.score_id if score else None, format=payload.format, content=html)
     db.add(report)
