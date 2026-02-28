@@ -295,6 +295,14 @@ header {
 }
 .stars-delta.none { color: var(--text-dim); }
 
+/* Stars total column */
+.col-stars-total { width: 90px; }
+.stars-total {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 /* Analysis column */
 .col-analysis { width: 200px; }
 
@@ -372,6 +380,13 @@ header {
   width: 12px;
   height: 12px;
   border-width: 1.5px;
+}
+
+/* Waiting state */
+.analyze-waiting {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
 }
 
 /* Table summary row */
