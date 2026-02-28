@@ -136,6 +136,8 @@ class ReportOut(BaseModel):
 
 class BizGenerateIn(BaseModel):
     model: Optional[str] = "rule-v1"
+    api_key: Optional[str] = None
+    provider: Optional[str] = None  # "anthropic" | "openrouter" | "zhipu"
 
 
 class ProjectOut(BaseModel):

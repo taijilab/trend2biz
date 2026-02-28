@@ -14,6 +14,7 @@
     </div>
     <div class="header-right">
       <a href="/docs" target="_blank" class="api-link">API Docs</a>
+      <button id="btn-settings" class="settings-icon-btn" title="设置">&#9881;</button>
     </div>
   </header>
 
@@ -30,6 +31,26 @@
         <option value="monthly">Monthly</option>
       </select>
     </div>
+    <div class="lang-group">
+      <select id="lang-select" class="lang-select" title="筛选编程语言">
+        <option value="">全部语言</option>
+        <option value="Python">Python</option>
+        <option value="JavaScript">JavaScript</option>
+        <option value="TypeScript">TypeScript</option>
+        <option value="Go">Go</option>
+        <option value="Rust">Rust</option>
+        <option value="Java">Java</option>
+        <option value="C">C</option>
+        <option value="C++">C++</option>
+        <option value="C#">C#</option>
+        <option value="Swift">Swift</option>
+        <option value="Kotlin">Kotlin</option>
+        <option value="Ruby">Ruby</option>
+        <option value="PHP">PHP</option>
+        <option value="Shell">Shell</option>
+      </select>
+    </div>
+
     <button id="btn-fetch" class="fetch-btn">
       &#9889; 抓取 Trending
     </button>
@@ -50,5 +71,55 @@
   </footer>
 
   <script src="/web/app.js"></script>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="settings-modal" style="display:none">
+    <div class="settings-box">
+      <div class="settings-header">
+        <span class="settings-title">&#9881; 设置</span>
+        <button class="settings-close-btn" id="settings-close-btn" aria-label="关闭">&#10005;</button>
+      </div>
+      <div class="settings-body">
+        <section class="settings-section">
+          <h4 class="settings-section-title">AI 描述生成</h4>
+          <div class="settings-field">
+            <label for="settings-provider">提供商</label>
+            <select id="settings-provider" class="settings-select">
+              <option value="anthropic">Anthropic（Claude Haiku）</option>
+              <option value="openrouter">OpenRouter（Deepseek-V3）</option>
+              <option value="zhipu">智谱 AI（GLM-4-Flash）</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <label for="settings-api-key">API Key</label>
+            <input type="password" id="settings-api-key" class="settings-input" placeholder="粘贴您的 API Key…" autocomplete="off">
+          </div>
+          <p class="settings-hint">Key 仅存储在本地浏览器，分析时随请求发送，不写入服务器数据库。</p>
+        </section>
+        <section class="settings-section">
+          <h4 class="settings-section-title">自动采集</h4>
+          <label class="settings-toggle-row">
+            <input type="checkbox" id="settings-auto-fetch" class="settings-checkbox">
+            <span>每日自动采集今日 Trending</span>
+          </label>
+          <p class="settings-hint">开启后，访问当天且无数据时自动触发 GitHub Trending 采集。</p>
+        </section>
+      </div>
+      <div class="settings-footer">
+        <button id="settings-save-btn" class="settings-save-btn">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Keyword Projects Modal -->
+  <div id="kw-modal" class="kw-modal" aria-modal="true" role="dialog" style="display:none">
+    <div class="kw-modal-box">
+      <div class="kw-modal-header">
+        <span id="kw-modal-title" class="kw-modal-title"></span>
+        <button class="kw-modal-close" id="kw-modal-close" aria-label="关闭">&#10005;</button>
+      </div>
+      <div id="kw-modal-body" class="kw-modal-body"></div>
+    </div>
+  </div>
 </body>
 </html>

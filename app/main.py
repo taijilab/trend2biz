@@ -57,7 +57,7 @@ from app.schemas import (
     WatchlistResp,
 )
 from app.services.biz import infer_biz_profile
-from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_repo_metrics
+from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_readme, fetch_repo_metrics
 from app.services.scoring import compute_score
 from app.services.trending import fetch_trending_html, parse_trending_html
 
@@ -263,12 +263,48 @@ def upsert_score(db: Session, project: Project, model: str, biz_id: Optional[str
     return score
 
 
-def translate_to_zh(text: str) -> Optional[str]:
-    """Translate text to Simplified Chinese via MyMemory free API (no key required)."""
-    if not text or not text.strip():
+def _call_llm_openrouter(api_key: str, prompt: str) -> Optional[str]:
+    """Call OpenRouter API (Deepseek-V3) for Chinese description generation."""
+    try:
+        r = httpx.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": "deepseek/deepseek-chat-v3-0324:free",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 256,
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip() or None
+    except Exception as e:
+        logger.warning("OpenRouter LLM call failed: %s", e)
         return None
-    if any('\u4e00' <= c <= '\u9fff' for c in text):
-        return text  # already Chinese
+
+
+def _call_llm_zhipu(api_key: str, prompt: str) -> Optional[str]:
+    """Call Zhipu AI (GLM-4-Flash) for Chinese description generation."""
+    try:
+        r = httpx.post(
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": "glm-4-flash",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 256,
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip() or None
+    except Exception as e:
+        logger.warning("Zhipu LLM call failed: %s", e)
+        return None
+
+
+def _translate_to_zh_mymemory(text: str) -> Optional[str]:
+    """Fallback: translate via MyMemory free API."""
     try:
         r = httpx.get(
             "https://api.mymemory.translated.net/get",
@@ -281,9 +317,77 @@ def translate_to_zh(text: str) -> Optional[str]:
         return None
 
 
-def generate_biz_and_score(db: Session, project: Project, model: str = "rule-v1") -> tuple[BizProfile, ProjectScore]:
+def enrich_description_zh(
+    repo_full_name: str,
+    description: Optional[str],
+    readme: Optional[str],
+    api_key: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> Optional[str]:
+    """Generate a rich Chinese project description using an LLM (if API key is set).
+
+    Supported providers: "anthropic" (default), "openrouter" (Deepseek-V3), "zhipu" (GLM-4-Flash).
+    Falls back to MyMemory translation when no key is available.
+    """
+    # Already Chinese?
+    if description and any('\u4e00' <= c <= '\u9fff' for c in description):
+        return description
+
+    effective_key = api_key or settings.anthropic_api_key
+    effective_provider = provider or "anthropic"
+
+    if effective_key and (description or readme):
+        context_parts = []
+        if description:
+            context_parts.append(f"GitHub 简介：{description}")
+        if readme:
+            context_parts.append(f"README（节选）：\n{readme}")
+        context = "\n\n".join(context_parts)
+        prompt = (
+            f"你是一名技术产品分析师。请根据以下开源项目资料，用中文写出 2～3 句准确、简洁的项目介绍。"
+            f"要求：说清楚项目是什么、解决什么问题、适合哪类用户使用，不要夸大，不要翻译腔。\n\n"
+            f"项目：{repo_full_name}\n\n{context}"
+        )
+
+        if effective_provider == "openrouter":
+            result = _call_llm_openrouter(effective_key, prompt)
+            if result:
+                return result
+        elif effective_provider == "zhipu":
+            result = _call_llm_zhipu(effective_key, prompt)
+            if result:
+                return result
+        else:  # anthropic
+            try:
+                import anthropic  # lazy import — optional dependency
+                client = anthropic.Anthropic(api_key=effective_key)
+                msg = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=256,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                result = msg.content[0].text.strip()
+                if result:
+                    return result
+            except Exception as e:
+                logger.warning("Anthropic description enrichment failed for %s: %s", repo_full_name, e)
+
+    # Fallback: simple translation of the short description
+    if description and description.strip():
+        return _translate_to_zh_mymemory(description)
+    return None
+
+
+def generate_biz_and_score(
+    db: Session,
+    project: Project,
+    model: str = "rule-v1",
+    api_key: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> tuple[BizProfile, ProjectScore]:
     biz_data = infer_biz_profile(project.repo_full_name, project.description, project.primary_language)
-    desc_zh = translate_to_zh(project.description)
+    readme = fetch_readme(project.repo_full_name, token=settings.github_token)
+    desc_zh = enrich_description_zh(project.repo_full_name, project.description, readme, api_key=api_key, provider=provider)
     if desc_zh:
         biz_data["explanations"]["description_zh"] = desc_zh
     biz = BizProfile(project_id=project.project_id, model_name=model, **biz_data)
@@ -384,11 +488,11 @@ def _do_metrics_refresh(db: Session, project_id: str, metric_date: date) -> None
     refresh_metrics_for_project(db, project, metric_date)
 
 
-def _do_biz_generate(db: Session, project_id: str, model: str) -> None:
+def _do_biz_generate(db: Session, project_id: str, model: str, api_key: Optional[str] = None, provider: Optional[str] = None) -> None:
     project = db.get(Project, project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
-    generate_biz_and_score(db, project, model=model)
+    generate_biz_and_score(db, project, model=model, api_key=api_key, provider=provider)
 
 
 def _do_score_batch(db: Session, snapshot_id: str, biz_model: str) -> None:
@@ -477,8 +581,8 @@ def run_metrics_refresh_job(job_id: str, project_id: str, metric_date: date) -> 
     _run_job_with_retry(job_id, _do_metrics_refresh, project_id, metric_date)
 
 
-def run_biz_generate_job(job_id: str, project_id: str, model: str) -> None:
-    _run_job_with_retry(job_id, _do_biz_generate, project_id, model)
+def run_biz_generate_job(job_id: str, project_id: str, model: str, api_key: Optional[str] = None, provider: Optional[str] = None) -> None:
+    _run_job_with_retry(job_id, _do_biz_generate, project_id, model, api_key, provider)
 
 
 def run_score_batch_job(job_id: str, snapshot_id: str, biz_model: str) -> None:
@@ -527,6 +631,25 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
         error=job.error,
         payload=job.payload,
     )
+
+
+@app.get(f"{settings.api_prefix}/trending/snapshots/dates")
+def get_snapshot_dates(
+    since: str = Query(..., pattern="^(daily|weekly|monthly)$"),
+    language: str = "all",
+    db: Session = Depends(get_db),
+):
+    """Return all dates (desc) for which a snapshot exists for the given since+language."""
+    rows = db.execute(
+        select(TrendingSnapshot.snapshot_date)
+        .where(
+            TrendingSnapshot.since == since,
+            TrendingSnapshot.language == language,
+        )
+        .order_by(desc(TrendingSnapshot.snapshot_date))
+        .limit(60)
+    ).scalars().all()
+    return {"dates": [str(d) for d in rows]}
 
 
 @app.get(f"{settings.api_prefix}/trending/snapshots", response_model=SnapshotResp)
@@ -806,7 +929,8 @@ def generate_biz_profiles(project_id: str, payload: BizGenerateIn, background_ta
     model = payload.model or "rule-v1"
     job = create_job(db, "biz_generate", {"project_id": project_id, "model": model})
     db.commit()
-    background_tasks.add_task(run_biz_generate_job, job.job_id, project_id, model)
+    # api_key is passed in memory only — NOT stored in the job payload / DB
+    background_tasks.add_task(run_biz_generate_job, job.job_id, project_id, model, payload.api_key, payload.provider)
     return JobResp(job_id=job.job_id, status=job.status)
 
 
