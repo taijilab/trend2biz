@@ -684,9 +684,145 @@ document.addEventListener('click', e => {
   if (e.target.id === 'kw-modal') closeKeywordModal();
 });
 
+// ── Jobs Panel ─────────────────────────────────────────────────────────────
+
+const JOB_TYPE_LABEL = {
+  trending_fetch:  '抓取 Trending',
+  metrics_refresh: '刷新指标',
+  biz_generate:    'AI 分析',
+  score_batch:     '批量评分',
+};
+const SCHED_LABEL = {
+  daily_trending:          'daily/all trending',
+  weekly_monthly_trending: 'weekly + monthly trending',
+  metrics_refresh:         'top-200 指标刷新',
+  biz_score:               '未分析项目 biz+score',
+};
+
+function fmtNextRun(isoStr) {
+  if (!isoStr) return '—';
+  const d = new Date(isoStr);
+  const now = new Date();
+  const diffMs = d - now;
+  if (diffMs < 0) return '即将运行';
+  const h = Math.floor(diffMs / 3600000);
+  const m = Math.floor((diffMs % 3600000) / 60000);
+  const hStr = h > 0 ? `${h}h ` : '';
+  return `${hStr}${m}m 后 (${d.toUTCString().slice(17, 22)} UTC)`;
+}
+
+function fmtJobTime(isoStr) {
+  if (!isoStr) return '—';
+  return new Date(isoStr).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+async function loadJobsPanel() {
+  // Today summary
+  const summaryEl = document.getElementById('jobs-summary');
+  summaryEl.textContent = '加载中…';
+  try {
+    const today = todayStr();
+    const res = await apiFetch(`${API}/jobs?limit=200`);
+    const data = res.ok ? await res.json() : { jobs: [] };
+    const todayJobs = (data.jobs || []).filter(j => (j.created_at || '').startsWith(today));
+    const counts = { queued: 0, running: 0, succeeded: 0, failed: 0 };
+    todayJobs.forEach(j => { counts[j.status] = (counts[j.status] || 0) + 1; });
+    const total = todayJobs.length;
+    summaryEl.innerHTML = total === 0
+      ? '<span class="jobs-empty">今日暂无任务</span>'
+      : `<span class="jobs-stat">&#128202; 共 ${total}</span>` +
+        (counts.running  ? `<span class="jobs-stat running">&#9654; 运行中 ${counts.running}</span>` : '') +
+        (counts.queued   ? `<span class="jobs-stat queued">&#8987; 排队 ${counts.queued}</span>` : '') +
+        `<span class="jobs-stat succeeded">&#10003; 成功 ${counts.succeeded}</span>` +
+        (counts.failed   ? `<span class="jobs-stat failed">&#10007; 失败 ${counts.failed}</span>` : '');
+
+    // Failed jobs list (last 20, any date)
+    const failed = (data.jobs || []).filter(j => j.status === 'failed').slice(0, 20);
+    const failCount = document.getElementById('jobs-fail-count');
+    failCount.textContent = failed.length ? `(${failed.length})` : '';
+    const failEl = document.getElementById('jobs-fail-list');
+    if (!failed.length) {
+      failEl.innerHTML = '<span class="jobs-empty">无失败任务 ✓</span>';
+    } else {
+      failEl.innerHTML = failed.map(j => {
+        const label = JOB_TYPE_LABEL[j.job_type] || j.job_type;
+        const p = j.payload || {};
+        const detail = p.since ? `${p.since}/${p.language}` : (p.project_id || '').slice(0, 8);
+        const t = fmtJobTime(j.created_at);
+        const errTip = j.error ? ` title="${escHtml(j.error)}"` : '';
+        return `<div class="jobs-fail-row"${errTip}>
+          <span class="jobs-type-badge">${escHtml(label)}</span>
+          <span class="jobs-fail-detail">${escHtml(detail)}</span>
+          <span class="jobs-fail-time">${t}</span>
+          <button class="jobs-retry-btn" data-jid="${j.job_id}">重试</button>
+        </div>`;
+      }).join('');
+    }
+  } catch (e) {
+    summaryEl.textContent = '加载失败';
+  }
+
+  // Scheduler status
+  try {
+    const sres = await apiFetch(`${API}/scheduler/status`);
+    if (sres.ok) {
+      const sdata = await sres.json();
+      const schedSection = document.getElementById('jobs-sched-section');
+      const schedEl = document.getElementById('jobs-schedule');
+      if (sdata.enabled && sdata.jobs && sdata.jobs.length) {
+        schedSection.style.display = '';
+        schedEl.innerHTML = sdata.jobs.map(j => {
+          const lbl = SCHED_LABEL[j.id] || j.id;
+          return `<div class="jobs-sched-row">
+            <span class="jobs-sched-name">${escHtml(lbl)}</span>
+            <span class="jobs-sched-next">${fmtNextRun(j.next_run)}</span>
+          </div>`;
+        }).join('');
+      } else {
+        schedSection.style.display = sdata.enabled ? '' : 'none';
+        if (!sdata.enabled) schedEl.textContent = '（调度器未启用）';
+      }
+    }
+  } catch (_) { /* ignore */ }
+}
+
+async function retryJob(jobId) {
+  const btn = document.querySelector(`.jobs-retry-btn[data-jid="${jobId}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const res = await apiFetch(`${API}/jobs/${jobId}:retry`, { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+    if (btn) { btn.textContent = '已入队'; }
+    setTimeout(loadJobsPanel, 1500);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '重试'; }
+    alert('重试失败: ' + e.message);
+  }
+}
+
+function openJobsPanel() {
+  document.getElementById('jobs-modal').style.display = 'flex';
+  loadJobsPanel();
+}
+function closeJobsPanel() {
+  document.getElementById('jobs-modal').style.display = 'none';
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   // Keyword modal
   document.getElementById('kw-modal-close').addEventListener('click', closeKeywordModal);
+
+  // Jobs panel
+  document.getElementById('btn-jobs').addEventListener('click', openJobsPanel);
+  document.getElementById('jobs-close-btn').addEventListener('click', closeJobsPanel);
+  document.getElementById('jobs-modal').addEventListener('click', e => {
+    if (e.target.id === 'jobs-modal') closeJobsPanel();
+  });
+  document.getElementById('jobs-refresh-btn').addEventListener('click', loadJobsPanel);
+  document.getElementById('jobs-fail-list').addEventListener('click', e => {
+    const btn = e.target.closest('.jobs-retry-btn');
+    if (btn) retryJob(btn.dataset.jid);
+  });
 
   // Settings modal
   document.getElementById('settings-close-btn').addEventListener('click', closeSettingsModal);
@@ -695,7 +831,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.target.id === 'settings-modal') closeSettingsModal();
   });
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { closeSettingsModal(); closeKeywordModal(); }
+    if (e.key === 'Escape') { closeSettingsModal(); closeKeywordModal(); closeJobsPanel(); }
   });
 
   // BD pitch tooltip on analyzed rows
