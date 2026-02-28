@@ -202,19 +202,19 @@ function analysisHtml(row, rowIdx) {
     return `<span class="analyze-waiting">等待分析</span>`;
   }
 
-  if (row.analyzed && row.score) {
+  if (row.analyzed && (row.score || row.biz)) {
     const s = row.score;
     const b = row.biz;
-    const grade = s.grade || '?';
-    const total = typeof s.total_score === 'number' ? s.total_score.toFixed(1) : '?';
+    const grade = s ? (s.grade || '?') : null;
+    const total = s && typeof s.total === 'number' ? s.total.toFixed(1) : null;
     const cat = b ? (b.category || '') : '';
     const mono = b && b.monetization_candidates ? b.monetization_candidates.slice(0, 2).join(', ') : '';
     return `
       <div class="score-info">
-        <div class="score-row">
+        ${grade ? `<div class="score-row">
           ${gradeBadgeHtml(grade)}
-          <span class="score-num">${total}</span>
-        </div>
+          ${total ? `<span class="score-num">${total}</span>` : ''}
+        </div>` : ''}
         ${cat ? `<span class="biz-category">${cat}</span>` : ''}
         ${mono ? `<span class="biz-monetization">${mono}</span>` : ''}
       </div>`;
