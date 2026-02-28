@@ -546,27 +546,37 @@ def get_trending_snapshots(
 
 @app.post(f"{settings.api_prefix}/trending/snapshots:fetch", response_model=JobResp, status_code=202)
 def fetch_snapshot(payload: SnapshotFetchIn, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    # Idempotency: reuse an in-progress job for the same date/since/language/spoken
-    in_flight = db.execute(
-        select(Job).where(Job.job_type == "trending_fetch", Job.status.in_(["queued", "running"]))
-    ).scalars().all()
-    for j in in_flight:
-        p = j.payload or {}
-        if (p.get("since") == payload.since
-                and p.get("language") == payload.language
-                and p.get("spoken") == payload.spoken
-                and p.get("date") == str(date.today())):
-            return JobResp(job_id=j.job_id, status=j.status)
-
     try:
+        # Idempotency: reuse an in-progress job for the same date/since/language/spoken
+        in_flight = db.execute(
+            select(Job).where(Job.job_type == "trending_fetch", Job.status.in_(["queued", "running"]))
+        ).scalars().all()
+        for j in in_flight:
+            p = j.payload or {}
+            if (p.get("since") == payload.since
+                    and p.get("language") == payload.language
+                    and p.get("spoken") == payload.spoken
+                    and p.get("date") == str(date.today())):
+                # Abandon stale queued jobs (server restarted before task ran)
+                age = datetime.utcnow() - j.created_at.replace(tzinfo=None)
+                if j.status == "queued" and age.total_seconds() > 300:
+                    j.status = "failed"
+                    j.error = "abandoned: server restarted before task could start"
+                    j.finished_at = datetime.utcnow()
+                    db.commit()
+                    break
+                return JobResp(job_id=j.job_id, status=j.status)
+
         job = create_job(
             db=db,
             job_type="trending_fetch",
             payload={"since": payload.since, "language": payload.language, "spoken": payload.spoken, "date": str(date.today())},
         )
         db.commit()
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.error("fetch_snapshot: failed to create job: %s", exc)
+        logger.error("fetch_snapshot failed: %s", exc)
         db.rollback()
         raise HTTPException(status_code=503, detail=f"抓取启动失败: {exc}")
     background_tasks.add_task(run_snapshot_fetch_job, job.job_id, payload.since, payload.language, payload.spoken, date.today())
