@@ -5,6 +5,7 @@ import json
 import logging
 import pathlib
 import re
+import subprocess
 import sys
 import time
 
@@ -92,6 +93,24 @@ def _setup_logging() -> None:
 _setup_logging()
 logger = logging.getLogger("trend2biz")
 
+# ---------------------------------------------------------------------------
+# Version / Build
+# ---------------------------------------------------------------------------
+
+APP_VERSION = "0.7.0"
+
+def _git_short_hash() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            cwd=pathlib.Path(__file__).parent.parent,
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+APP_BUILD = _git_short_hash()
+
 app = FastAPI(title=settings.app_name)
 
 _STATIC_DIR = pathlib.Path(__file__).parent.parent / "static"
@@ -127,6 +146,11 @@ def startup() -> None:
 @app.get("/ping")
 def ping() -> dict:
     return {"pong": True}
+
+
+@app.get("/api/v1/version")
+def version() -> dict:
+    return {"version": APP_VERSION, "build": APP_BUILD}
 
 
 # ---------------------------------------------------------------------------
