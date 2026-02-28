@@ -661,6 +661,16 @@ footer {
   line-height: 1.5;
   margin: 0;
 }
+.settings-warn {
+  background: rgba(248,113,113,0.1);
+  border: 1px solid rgba(248,113,113,0.35);
+  color: var(--danger);
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
 .settings-toggle-row {
   display: flex;
   align-items: center;
@@ -711,3 +721,188 @@ footer {
   margin-top: 4px;
 }
 .no-data-nav-btn:hover { background: var(--accent-hover); }
+
+/* ── Desktop-only helpers ── */
+.lang-mobile-only   { display: none; }
+.stars-total-mobile { display: none; }
+.repo-name-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ── Tablet (≤ 900px) ── */
+@media (max-width: 900px) {
+  .col-stars-total { display: none; }
+  .col-lang        { width: 90px; }
+  .col-analysis    { width: 170px; }
+}
+
+/* ── Mobile (≤ 640px): card layout ── */
+@media (max-width: 640px) {
+  /* Header */
+  header { padding: 9px 14px; gap: 8px; }
+  .subtitle { display: none; }
+  .logo { font-size: 16px; }
+  .api-link { display: none; }
+  .settings-icon-btn { margin-left: 0; }
+
+  /* Controls */
+  .controls { padding: 8px 12px; gap: 6px; }
+  .date-input { max-width: 128px; }
+  .fetch-btn { padding: 4px 10px; font-size: 12px; }
+  .lang-select { max-width: 108px; font-size: 12px; }
+  .since-select { font-size: 12px; }
+
+  /* Status bar */
+  .status-bar { padding: 6px 14px; font-size: 12px; line-height: 1.4; }
+
+  /* Content */
+  .content { padding: 12px 10px; }
+
+  /* Table summary */
+  .table-summary { text-align: left; padding: 4px 0 10px; font-size: 11px; }
+
+  /* ── Table → Card layout ── */
+  .trend-table { display: block; }
+
+  .trend-table thead { display: none; }
+
+  .trend-table tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .trend-table tr.trend-row {
+    display: grid;
+    grid-template-columns: 34px 1fr auto;
+    grid-template-rows: auto auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .trend-table tr.trend-row.analyzed  { border-color: rgba(124,106,247,0.3); }
+  .trend-table tr.trend-row.analyzing { border-color: rgba(124,106,247,0.5); }
+
+  /* Rank — left strip, spans both rows */
+  td.col-rank {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--surface2);
+    border-right: 1px solid var(--border);
+    padding: 0;
+  }
+  td.col-rank .cell { padding: 8px 4px; min-height: unset; }
+  .rank-num { font-size: 12px; }
+
+  /* Repo info — row 1, col 2 */
+  td.col-repo {
+    grid-column: 2;
+    grid-row: 1;
+    padding: 0;
+    border: none;
+  }
+  td.col-repo .cell { padding: 10px 8px 4px; min-height: unset; align-items: flex-start; }
+  .repo-name { font-size: 13px; }
+  .repo-owner { font-size: 11px; }
+  .repo-desc { font-size: 11px; line-height: 1.4; margin-top: 2px; }
+
+  /* Language column — hidden; pill shown inline in repo cell */
+  td.col-lang { display: none; }
+  .lang-mobile-only {
+    display: inline-flex;
+    font-size: 10px;
+    padding: 1px 5px;
+    line-height: 16px;
+    opacity: 0.85;
+  }
+
+  /* Stars row — row 2, col 2 */
+  td.col-stars {
+    grid-column: 2;
+    grid-row: 2;
+    padding: 0;
+    border: none;
+  }
+  td.col-stars .cell {
+    padding: 2px 8px 9px;
+    min-height: unset;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .stars-delta { font-size: 12px; }
+  .stars-total-mobile {
+    display: inline-block;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  /* Stars total column — hidden (value shown in stars cell) */
+  td.col-stars-total { display: none; }
+
+  /* Analysis — right strip, spans both rows */
+  td.col-analysis {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    border: none;
+    border-left: 1px solid var(--border);
+    min-width: 108px;
+    max-width: 150px;
+    padding: 0;
+  }
+  td.col-analysis .cell {
+    padding: 10px 10px 10px 8px;
+    min-height: unset;
+    align-items: flex-start;
+  }
+  .col-analysis { width: auto; }
+
+  /* Score / biz tags in analysis cell */
+  .score-info { gap: 4px; }
+  .kw-tags { gap: 2px; }
+  .kw-tag { font-size: 10px; padding: 1px 5px; }
+  .biz-monetization { font-size: 10px; }
+  .analyze-btn { font-size: 11px; padding: 4px 8px; }
+
+  /* Modals → bottom sheet */
+  .kw-modal,
+  .settings-modal {
+    padding: 0;
+    align-items: flex-end;
+  }
+  .kw-modal-box,
+  .settings-box {
+    border-radius: 14px 14px 0 0;
+    max-width: 100%;
+    width: 100%;
+    max-height: 88vh;
+  }
+  .settings-box { max-height: 95vh; overflow-y: auto; }
+  .kw-modal-header,
+  .settings-header { padding: 14px 16px; }
+  .kw-modal-body .kw-project-row { padding: 10px 16px; }
+  .settings-body { padding: 4px 16px; }
+  .settings-footer { padding: 12px 16px; }
+  .settings-section { padding: 12px 0; }
+
+  /* No-data / empty states */
+  .no-data-hint { padding: 28px 14px; }
+  .empty-state { padding: 28px 14px; }
+
+  /* Footer */
+  footer { padding: 7px 14px; font-size: 10px; }
+}
+
+/* ── Very small phones (≤ 400px) ── */
+@media (max-width: 400px) {
+  td.col-analysis { min-width: 90px; max-width: 120px; }
+  .date-input { max-width: 110px; }
+  .lang-select { max-width: 90px; }
+}

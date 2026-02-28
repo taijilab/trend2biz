@@ -675,12 +675,50 @@ def get_trending_snapshots(
     if not snapshot:
         raise HTTPException(status_code=404, detail="snapshot not found")
 
-    items = db.execute(
+    snap_items = db.execute(
         select(TrendingSnapshotItem)
         .where(TrendingSnapshotItem.snapshot_id == snapshot.snapshot_id)
         .order_by(TrendingSnapshotItem.rank.asc())
         .limit(limit)
-    ).scalars()
+    ).scalars().all()
+
+    # Batch-load latest biz profiles and scores for all project IDs in this snapshot
+    project_ids = [i.project_id for i in snap_items if i.project_id]
+    biz_by_pid: dict = {}
+    score_by_pid: dict = {}
+    if project_ids:
+        for b in db.execute(
+            select(BizProfile).where(BizProfile.project_id.in_(project_ids))
+            .order_by(desc(BizProfile.created_at))
+        ).scalars().all():
+            if b.project_id not in biz_by_pid:
+                biz_by_pid[b.project_id] = b
+        for s in db.execute(
+            select(ProjectScore).where(ProjectScore.project_id.in_(project_ids))
+            .order_by(desc(ProjectScore.created_at))
+        ).scalars().all():
+            if s.project_id not in score_by_pid:
+                score_by_pid[s.project_id] = s
+
+    def _item_biz(pid: Optional[str]) -> Optional[dict]:
+        b = biz_by_pid.get(pid) if pid else None
+        if not b:
+            return None
+        return {
+            "category": b.category,
+            "scenarios": b.scenarios,
+            "value_props": b.value_props,
+            "delivery_forms": b.delivery_forms,
+            "monetization_candidates": b.monetization_candidates,
+            "buyer": b.buyer,
+            "sales_motion": b.sales_motion,
+            "confidence": b.confidence,
+            "description_zh": b.explanations.get("description_zh") if b.explanations else None,
+        }
+
+    def _item_score(pid: Optional[str]) -> Optional[dict]:
+        s = score_by_pid.get(pid) if pid else None
+        return {"total": s.total_score, "grade": s.grade} if s else None
 
     return SnapshotResp(
         snapshot=SnapshotOut(
@@ -701,8 +739,11 @@ def get_trending_snapshots(
                 stars_total_hint=i.stars_total_hint,
                 forks_total_hint=i.forks_total_hint,
                 stars_delta_window=i.stars_delta_window,
+                project_id=i.project_id,
+                latest_biz=_item_biz(i.project_id),
+                latest_score=_item_score(i.project_id),
             )
-            for i in items
+            for i in snap_items
         ],
     )
 
