@@ -60,7 +60,7 @@ from app.schemas import (
     WatchlistResp,
 )
 from app.services.biz import infer_biz_profile
-from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_readme, fetch_repo_metrics
+from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_readme, fetch_repo_metrics, fetch_star_history
 from app.services.scoring import compute_score
 from app.services.trending import fetch_trending_html, parse_trending_html
 
@@ -1230,17 +1230,35 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             f"（以上为规则推断，使用 AI 模型分析后可获得更精准的中文解读）"
         )
 
-    # Star history for chart — primary: RepoMetricDaily; fallback: TrendingSnapshotItem
+    # Star history for chart
+    # Priority 1: GitHub Stargazers API (star-history.com technique) — rich history
+    # Priority 2: RepoMetricDaily — daily snapshots from past metric refreshes
+    # Priority 3: TrendingSnapshotItem.stars_total_hint — sparse but always available
     import json as _json
-    metrics_rows = db.execute(
-        select(RepoMetricDaily)
-        .where(RepoMetricDaily.project_id == project.project_id)
-        .order_by(RepoMetricDaily.metric_date.asc())
-    ).scalars().all()
-    star_dates = [str(r.metric_date) for r in metrics_rows if r.stars is not None]
-    star_values = [r.stars for r in metrics_rows if r.stars is not None]
+    star_dates: list[str] = []
+    star_values: list[int] = []
+    star_source = ""
 
-    # Fallback: use trending snapshot stars_total_hint if no metric rows
+    try:
+        history = fetch_star_history(project.repo_full_name, token=settings.github_token)
+        if history:
+            star_dates = [h[0] for h in history]
+            star_values = [h[1] for h in history]
+            star_source = "GitHub Stargazers API"
+    except Exception:
+        pass
+
+    if not star_dates:
+        metrics_rows = db.execute(
+            select(RepoMetricDaily)
+            .where(RepoMetricDaily.project_id == project.project_id)
+            .order_by(RepoMetricDaily.metric_date.asc())
+        ).scalars().all()
+        star_dates = [str(r.metric_date) for r in metrics_rows if r.stars is not None]
+        star_values = [r.stars for r in metrics_rows if r.stars is not None]
+        if star_dates:
+            star_source = "每日指标快照"
+
     if not star_dates:
         trending_rows = db.execute(
             select(TrendingSnapshotItem, TrendingSnapshot.snapshot_date)
@@ -1251,6 +1269,8 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         ).all()
         star_dates = [str(row[1]) for row in trending_rows]
         star_values = [row[0].stars_total_hint for row in trending_rows]
+        if star_dates:
+            star_source = "Trending 快照"
 
     grade = score.grade if score else "N/A"
     total_score = score.total_score if score else None
@@ -1346,9 +1366,13 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     </div>""" if biz else ""
 
     # Star history chart section
+    star_source_note = (
+        f'<span style="font-size:10px;font-weight:400;color:#94a3b8;'
+        f'text-transform:none;letter-spacing:0"> · {star_source}</span>'
+    ) if star_source else ""
     star_chart_section = (
-        '<div class="card"><h2>Star 增长历史</h2>'
-        '<canvas id="starChart" style="max-height:180px"></canvas></div>'
+        f'<div class="card"><h2>Star 增长历史{star_source_note}</h2>'
+        f'<canvas id="starChart" style="max-height:220px"></canvas></div>'
     ) if star_dates else ""
     chart_script = (
         f'<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>\n'
@@ -1366,17 +1390,34 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         f'        borderColor: "#0f3460",\n'
         f'        backgroundColor: "rgba(15,52,96,0.08)",\n'
         f'        borderWidth: 2,\n'
-        f'        pointRadius: 2,\n'
+        f'        pointRadius: 3,\n'
+        f'        pointHoverRadius: 5,\n'
         f'        tension: 0.3,\n'
         f'        fill: true\n'
         f'      }}]\n'
         f'    }},\n'
         f'    options: {{\n'
         f'      responsive: true,\n'
-        f'      plugins: {{ legend: {{ display: false }} }},\n'
+        f'      interaction: {{ mode: "index", intersect: false }},\n'
+        f'      plugins: {{\n'
+        f'        legend: {{ display: false }},\n'
+        f'        tooltip: {{\n'
+        f'          callbacks: {{\n'
+        f'            label: function(ctx) {{\n'
+        f'              var v = ctx.parsed.y;\n'
+        f'              return "⭐ " + (v >= 1000 ? (v/1000).toFixed(1)+"k" : v);\n'
+        f'            }}\n'
+        f'          }}\n'
+        f'        }}\n'
+        f'      }},\n'
         f'      scales: {{\n'
         f'        x: {{ ticks: {{ maxTicksLimit: 8, font: {{ size: 10 }} }} }},\n'
-        f'        y: {{ ticks: {{ font: {{ size: 10 }} }} }}\n'
+        f'        y: {{\n'
+        f'          ticks: {{\n'
+        f'            font: {{ size: 10 }},\n'
+        f'            callback: function(v) {{ return v >= 1000 ? (v/1000).toFixed(0)+"k" : v; }}\n'
+        f'          }}\n'
+        f'        }}\n'
         f'      }}\n'
         f'    }}\n'
         f'  }});\n'
