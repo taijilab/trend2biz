@@ -96,12 +96,29 @@ if _STATIC_DIR.is_dir():
     app.mount("/web", StaticFiles(directory=str(_STATIC_DIR), html=True), name="web")
 
 
+def _migrate_add_missing_columns() -> None:
+    """Idempotent column migrations for databases created before schema additions."""
+    migrations = [
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 3",
+    ]
+    with engine.connect() as conn:
+        for sql in migrations:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                logger.info("migration ok: %s", sql[:60])
+            except Exception as exc:
+                logger.warning("migration skipped (%s): %s", sql[:60], exc)
+
+
 @app.on_event("startup")
 def startup() -> None:
     try:
         Base.metadata.create_all(bind=engine)
     except Exception as exc:
         logger.error("DB create_all failed: %s", exc)
+    _migrate_add_missing_columns()
 
 
 @app.get("/ping")
