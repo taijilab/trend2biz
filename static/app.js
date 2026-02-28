@@ -11,6 +11,7 @@ let currentDate = todayStr();
 let currentSince = 'daily';
 let currentLanguage = '';   // '' = all languages (client-side filter)
 let tableRows = [];   // merged rows
+let _pendingAnalysisRowIdx = null;   // set when warning modal opens with a pending row
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 
@@ -381,6 +382,7 @@ window.startAnalysis = function(rowIdx) {
   if (!row || row._analyzing || !row.project_id) return;
   const s = getSettings();
   if ((s.ai_model || 'rule-v1') === 'llm-v1' && !s.ai_api_key) {
+    _pendingAnalysisRowIdx = rowIdx;
     openSettingsModal(true);   // open settings with "no key" warning
     return;
   }
@@ -582,6 +584,20 @@ function saveSettingsModal() {
   };
   saveSettings(s);
   closeSettingsModal();
+
+  // Auto-retry analysis that triggered the "no key" warning
+  if (_pendingAnalysisRowIdx !== null && s.ai_api_key && (s.ai_model || 'rule-v1') === 'llm-v1') {
+    const pendingIdx = _pendingAnalysisRowIdx;
+    _pendingAnalysisRowIdx = null;
+    const pendingRow = tableRows[pendingIdx];
+    if (pendingRow && !pendingRow._analyzing) {
+      setStatus('Key 已保存，正在分析…', 'info');
+      analyzeProject(pendingRow.project_id, pendingIdx);
+      return;
+    }
+  }
+  _pendingAnalysisRowIdx = null;
+
   setStatus('设置已保存', 'success');
   setTimeout(clearStatus, 2000);
 }

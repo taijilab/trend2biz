@@ -897,20 +897,20 @@ footer {
   .biz-monetization { font-size: 10px; }
   .analyze-btn { font-size: 11px; padding: 4px 8px; }
 
-  /* Modals → bottom sheet */
+  /* Modals → centered, full-width with edge padding */
   .kw-modal,
   .settings-modal {
-    padding: 0;
-    align-items: flex-end;
+    padding: 12px;
+    align-items: center;
   }
   .kw-modal-box,
   .settings-box {
-    border-radius: 14px 14px 0 0;
+    border-radius: 12px;
     max-width: 100%;
     width: 100%;
-    max-height: 88vh;
+    max-height: 85vh;
   }
-  .settings-box { max-height: 95vh; overflow-y: auto; }
+  .settings-box { max-height: 90vh; overflow-y: auto; }
   .kw-modal-header,
   .settings-header { padding: 14px 16px; }
   .kw-modal-body .kw-project-row { padding: 10px 16px; }
