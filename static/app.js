@@ -86,6 +86,7 @@ function mergeRows(snapshotItems, projects) {
       description: si.description,
       primary_language: si.primary_language,
       stars_delta: si.stars_delta_window,
+      stars_total: si.stars_total_hint,
       project_id: proj ? proj.project_id : null,
       analyzed: proj && (proj.latest_score !== null || proj.latest_biz_profile !== null),
       score: proj ? proj.latest_score : null,
@@ -155,6 +156,26 @@ async function analyzeProject(projectId, rowIdx) {
   }
 }
 
+async function autoAnalyzeAll() {
+  const queue = tableRows
+    .map((row, idx) => ({ row, idx }))
+    .filter(({ row }) => !row.analyzed && row.project_id);
+
+  // Mark all as waiting and update UI
+  for (const { row, idx } of queue) {
+    row._waiting = true;
+    const cell = document.getElementById(`analysis-${idx}`);
+    if (cell) cell.querySelector('.cell').innerHTML = analysisHtml(row, idx);
+  }
+
+  // Process one at a time (sequential to avoid API overload)
+  for (const { row, idx } of queue) {
+    if (!row._waiting) continue;  // skip if manually triggered already
+    row._waiting = false;
+    await analyzeProject(row.project_id, idx);
+  }
+}
+
 // ── Rendering ──────────────────────────────────────────────────────────────
 
 function langDotHtml(lang) {
@@ -175,6 +196,10 @@ function analysisHtml(row, rowIdx) {
   }
   if (row._analyzing === 'error') {
     return `<div class="analyze-progress" style="color:var(--danger)">&#10005; 失败</div>`;
+  }
+
+  if (row._waiting) {
+    return `<span class="analyze-waiting">等待分析</span>`;
   }
 
   if (row.analyzed && row.score) {
@@ -216,6 +241,7 @@ function buildTableHtml(rows) {
           <th class="col-repo">项目</th>
           <th class="col-lang">语言</th>
           <th class="col-stars">&#9733; 今日新增</th>
+          <th class="col-stars-total">&#9733; Star总数</th>
           <th class="col-analysis">商业分析</th>
         </tr>
       </thead>
@@ -229,7 +255,12 @@ function buildTableHtml(rows) {
     const lang = row.primary_language || '';
     const delta = row.stars_delta != null ? `+${row.stars_delta}` : '—';
     const deltaClass = row.stars_delta ? '' : 'none';
+    const totalStars = row.stars_total != null ? row.stars_total.toLocaleString() : '—';
     const rowClass = row.analyzed ? 'analyzed' : (row._analyzing ? 'analyzing' : '');
+    const chineseDesc = row.biz && row.biz.scenarios && row.biz.scenarios.length
+      ? row.biz.scenarios.slice(0, 2).join(' · ')
+      : null;
+    const descText = chineseDesc || row.description;
 
     html += `
       <tr class="trend-row ${rowClass}" id="row-${idx}" data-lang="${lang}">
@@ -239,7 +270,7 @@ function buildTableHtml(rows) {
             <a class="repo-name" href="https://github.com/${row.repo_full_name}" target="_blank">
               <span class="repo-owner">${owner}/</span>${name}
             </a>
-            ${row.description ? `<div class="repo-desc">${escHtml(row.description)}</div>` : ''}
+            ${descText ? `<div class="repo-desc">${escHtml(descText)}</div>` : ''}
           </div>
         </td>
         <td class="col-lang">
@@ -252,6 +283,9 @@ function buildTableHtml(rows) {
         </td>
         <td class="col-stars">
           <div class="cell"><span class="stars-delta ${deltaClass}">${delta}</span></div>
+        </td>
+        <td class="col-stars-total">
+          <div class="cell"><span class="stars-total">${totalStars}</span></div>
         </td>
         <td class="col-analysis" id="analysis-${idx}">
           <div class="cell">${analysisHtml(row, idx)}</div>
@@ -362,6 +396,7 @@ async function loadDashboard(date, since, forceRefetch = false) {
     content.innerHTML = buildTableHtml(tableRows);
     document.getElementById('footer-info').textContent =
       `${date} · ${since} · ${tableRows.length} 个项目`;
+    autoAnalyzeAll();
 
   } catch (err) {
     content.innerHTML = `<div class="empty-state"><h3>加载失败</h3><p>${escHtml(err.message)}</p></div>`;
