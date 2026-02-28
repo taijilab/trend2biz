@@ -57,7 +57,7 @@ from app.schemas import (
     WatchlistResp,
 )
 from app.services.biz import infer_biz_profile
-from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_repo_metrics
+from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_readme, fetch_repo_metrics
 from app.services.scoring import compute_score
 from app.services.trending import fetch_trending_html, parse_trending_html
 
@@ -263,12 +263,8 @@ def upsert_score(db: Session, project: Project, model: str, biz_id: Optional[str
     return score
 
 
-def translate_to_zh(text: str) -> Optional[str]:
-    """Translate text to Simplified Chinese via MyMemory free API (no key required)."""
-    if not text or not text.strip():
-        return None
-    if any('\u4e00' <= c <= '\u9fff' for c in text):
-        return text  # already Chinese
+def _translate_to_zh_mymemory(text: str) -> Optional[str]:
+    """Fallback: translate via MyMemory free API."""
     try:
         r = httpx.get(
             "https://api.mymemory.translated.net/get",
@@ -281,9 +277,54 @@ def translate_to_zh(text: str) -> Optional[str]:
         return None
 
 
+def enrich_description_zh(repo_full_name: str, description: Optional[str], readme: Optional[str]) -> Optional[str]:
+    """Generate a rich Chinese project description using Claude (if API key is set).
+
+    Falls back to MyMemory translation of the short GitHub description when no
+    Anthropic key is configured or the LLM call fails.
+    """
+    # Already Chinese?
+    if description and any('\u4e00' <= c <= '\u9fff' for c in description):
+        return description
+
+    api_key = settings.anthropic_api_key
+    if api_key and (description or readme):
+        try:
+            import anthropic  # lazy import — optional dependency
+            client = anthropic.Anthropic(api_key=api_key)
+
+            context_parts = []
+            if description:
+                context_parts.append(f"GitHub 简介：{description}")
+            if readme:
+                context_parts.append(f"README（节选）：\n{readme}")
+            context = "\n\n".join(context_parts)
+
+            prompt = (
+                f"你是一名技术产品分析师。请根据以下开源项目资料，用中文写出 2～3 句准确、简洁的项目介绍。"
+                f"要求：说清楚项目是什么、解决什么问题、适合哪类用户使用，不要夸大，不要翻译腔。\n\n"
+                f"项目：{repo_full_name}\n\n{context}"
+            )
+            msg = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=256,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = msg.content[0].text.strip()
+            return result if result else None
+        except Exception as e:
+            logger.warning("LLM description enrichment failed for %s: %s", repo_full_name, e)
+
+    # Fallback: simple translation of the short description
+    if description and description.strip():
+        return _translate_to_zh_mymemory(description)
+    return None
+
+
 def generate_biz_and_score(db: Session, project: Project, model: str = "rule-v1") -> tuple[BizProfile, ProjectScore]:
     biz_data = infer_biz_profile(project.repo_full_name, project.description, project.primary_language)
-    desc_zh = translate_to_zh(project.description)
+    readme = fetch_readme(project.repo_full_name, token=settings.github_token)
+    desc_zh = enrich_description_zh(project.repo_full_name, project.description, readme)
     if desc_zh:
         biz_data["explanations"]["description_zh"] = desc_zh
     biz = BizProfile(project_id=project.project_id, model_name=model, **biz_data)

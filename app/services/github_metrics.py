@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -107,3 +109,46 @@ def fetch_repo_metrics(repo_full_name: str, token: Optional[str] = None) -> dict
         "updated_at_github": data.get("updated_at"),
         "pushed_at_github": data.get("pushed_at"),
     }
+
+
+def fetch_readme(repo_full_name: str, token: Optional[str] = None, max_chars: int = 4000) -> Optional[str]:
+    """Fetch and return plain-text README content for a repo (up to max_chars).
+
+    Returns None if the repo has no README or the request fails.
+    Strips markdown images, badge lines, and HTML comments to reduce noise.
+    """
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "Trend2Biz/0.2"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    url = f"https://api.github.com/repos/{repo_full_name}/readme"
+    try:
+        resp = httpx.get(url, timeout=15.0, headers=headers)
+    except Exception:
+        return None
+
+    if resp.status_code == 404:
+        return None
+    _check_rate_limit(resp)
+    if resp.status_code >= 400:
+        return None
+
+    payload = resp.json()
+    encoding = payload.get("encoding", "")
+    raw_content = payload.get("content", "")
+    if encoding == "base64":
+        try:
+            text = base64.b64decode(raw_content).decode("utf-8", errors="replace")
+        except Exception:
+            return None
+    else:
+        text = raw_content
+
+    # Strip noise: HTML comments, badge lines ([![...](...)]), pure image lines
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    text = re.sub(r"^\s*\[!\[.*?\]\(.*?\)\]\(.*?\)\s*$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*!\[.*?\]\(.*?\)\s*$", "", text, flags=re.MULTILINE)
+    # Collapse excessive blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()[:max_chars] or None
