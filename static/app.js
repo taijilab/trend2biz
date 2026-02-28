@@ -9,6 +9,7 @@ const POLL_TIMEOUT = 120000;
 
 let currentDate = todayStr();
 let currentSince = 'daily';
+let currentLanguage = '';   // '' = all languages (client-side filter)
 let tableRows = [];   // merged rows
 
 // ── Utilities ──────────────────────────────────────────────────────────────
@@ -56,6 +57,14 @@ async function fetchSnapshotItems(date, since) {
   if (!res.ok) throw new Error(`Snapshot fetch error: ${res.status}`);
   const data = await res.json();
   return data.items || [];
+}
+
+async function fetchAvailableDates(since) {
+  const params = new URLSearchParams({ since });
+  const res = await apiFetch(`${API}/trending/snapshots/dates?${params}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.dates || [];
 }
 
 async function fetchProjects() {
@@ -130,12 +139,15 @@ async function analyzeProject(projectId, rowIdx) {
     const { job_id: j1 } = await r1.json();
     await pollJob(j1);
 
-    // Step 2: biz:generate
+    // Step 2: biz:generate (pass API key/provider from settings if configured)
     renderAnalysisCell(rowIdx, 'biz');
+    const { ai_api_key, ai_provider } = getSettings();
+    const bizPayload = { model: 'rule-v1' };
+    if (ai_api_key) { bizPayload.api_key = ai_api_key; bizPayload.provider = ai_provider || 'anthropic'; }
     const r2 = await apiFetch(`${API}/projects/${projectId}/biz-profiles:generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'rule-v1' }),
+      body: JSON.stringify(bizPayload),
     });
     if (r2.status !== 202) throw new Error(`biz:generate failed: ${r2.status}`);
     const { job_id: j2 } = await r2.json();
@@ -227,13 +239,16 @@ function analysisHtml(row, rowIdx) {
   return `<button class="analyze-btn" onclick="startAnalysis(${rowIdx})">&#9889; 分析</button>`;
 }
 
-function buildTableHtml(rows) {
-  if (!rows.length) return '<div class="empty-state"><p>无项目数据</p></div>';
+// rowPairs: [{row, idx}] where idx is the original index in tableRows
+function buildTableHtml(rowPairs) {
+  if (!rowPairs.length) return '<div class="empty-state"><p>无匹配项目</p></div>';
 
-  const analysedCount = rows.filter(r => r.analyzed).length;
+  const totalAnalysed = tableRows.filter(r => r.analyzed).length;
+  const filterNote = rowPairs.length < tableRows.length
+    ? ` &nbsp;·&nbsp; 筛选显示 ${rowPairs.length} 个` : '';
 
   let html = `
-    <div class="table-summary">已分析 ${analysedCount} / ${rows.length} 个项目</div>
+    <div class="table-summary">已分析 ${totalAnalysed} / ${tableRows.length} 个项目${filterNote}</div>
     <table class="trend-table">
       <thead>
         <tr>
@@ -248,7 +263,7 @@ function buildTableHtml(rows) {
       <tbody id="table-body">
   `;
 
-  rows.forEach((row, idx) => {
+  rowPairs.forEach(({row, idx}) => {
     const parts = row.repo_full_name.split('/');
     const owner = parts[0] || '';
     const name = parts[1] || row.repo_full_name;
@@ -299,6 +314,18 @@ function buildTableHtml(rows) {
   return html;
 }
 
+function getFilteredRowPairs() {
+  const pairs = tableRows.map((row, idx) => ({row, idx}));
+  if (!currentLanguage) return pairs;
+  return pairs.filter(({row}) => (row.primary_language || '') === currentLanguage);
+}
+
+function renderTable() {
+  const content = document.getElementById('content');
+  if (!content) return;
+  content.innerHTML = buildTableHtml(getFilteredRowPairs());
+}
+
 function renderAnalysisCell(rowIdx, state, errMsg) {
   const cell = document.getElementById(`analysis-${rowIdx}`);
   if (!cell) return;
@@ -317,7 +344,11 @@ function updateSummary() {
   const el = document.querySelector('.table-summary');
   if (!el) return;
   const analysedCount = tableRows.filter(r => r.analyzed).length;
-  el.textContent = `已分析 ${analysedCount} / ${tableRows.length} 个项目`;
+  const displayedCount = currentLanguage
+    ? tableRows.filter(r => (r.primary_language || '') === currentLanguage).length
+    : tableRows.length;
+  const filterNote = displayedCount < tableRows.length ? ` &nbsp;·&nbsp; 筛选显示 ${displayedCount} 个` : '';
+  el.innerHTML = `已分析 ${analysedCount} / ${tableRows.length} 个项目${filterNote}`;
 }
 
 function escHtml(str) {
@@ -358,18 +389,40 @@ async function loadDashboard(date, since, forceRefetch = false) {
     if (snapshotItems === null) {
       // No data for this date
       if (date !== todayStr()) {
-        // Historical date with no data
+        // Historical date with no data — find nearest available date
+        let nearestDate = null;
+        try {
+          const dates = await fetchAvailableDates(since);
+          nearestDate = dates.find(d => d < date) || dates[0] || null;
+        } catch (_) { /* ignore */ }
+
+        const hintMsg = nearestDate
+          ? `${date} 的 ${since} 数据尚未采集，最近有数据的日期是 ${nearestDate}`
+          : `${date} 尚无 ${since} Trending 数据，过去的数据未曾采集`;
+        const btnHtml = nearestDate
+          ? `<button class="no-data-nav-btn" id="no-data-nav-btn">跳转到 ${nearestDate}</button>`
+          : '';
         content.innerHTML = `
-          <div class="empty-state">
+          <div class="no-data-hint">
             <h3>暂无数据</h3>
-            <p>${date} 尚无 ${since} Trending 数据</p>
+            <p>${escHtml(hintMsg)}</p>
+            ${btnHtml}
           </div>`;
+        if (nearestDate) {
+          document.getElementById('no-data-nav-btn').addEventListener('click', () => {
+            currentDate = nearestDate;
+            document.getElementById('date-input').value = nearestDate;
+            document.getElementById('btn-next').disabled = nearestDate >= todayStr();
+            loadDashboard(nearestDate, since);
+          });
+        }
         document.getElementById('footer-info').textContent = `${date} · ${since} · 无数据`;
         return;
       }
 
-      // Today: offer to fetch
-      if (forceRefetch) {
+      // Today: auto-fetch if setting is on, otherwise prompt
+      const s = getSettings();
+      if (forceRefetch || s.auto_fetch) {
         setStatus('正在抓取今日 Trending...', 'info');
         await triggerFetch(since);
         snapshotItems = await fetchSnapshotItems(date, since) || [];
@@ -395,7 +448,7 @@ async function loadDashboard(date, since, forceRefetch = false) {
     const projects = await fetchProjects();
     tableRows = mergeRows(snapshotItems, projects);
 
-    content.innerHTML = buildTableHtml(tableRows);
+    renderTable();
     document.getElementById('footer-info').textContent =
       `${date} · ${since} · ${tableRows.length} 个项目`;
     autoAnalyzeAll();
@@ -409,17 +462,28 @@ async function loadDashboard(date, since, forceRefetch = false) {
 // ── Init ───────────────────────────────────────────────────────────────────
 
 function init() {
-  const dateInput = document.getElementById('date-input');
-  const sinceSelect = document.getElementById('since-select');
-  const btnPrev = document.getElementById('btn-prev');
-  const btnNext = document.getElementById('btn-next');
-  const btnFetch = document.getElementById('btn-fetch');
-  const btnRefresh = document.getElementById('btn-refresh');
+  const dateInput    = document.getElementById('date-input');
+  const sinceSelect  = document.getElementById('since-select');
+  const btnPrev      = document.getElementById('btn-prev');
+  const btnNext      = document.getElementById('btn-next');
+  const btnFetch     = document.getElementById('btn-fetch');
+  const btnRefresh   = document.getElementById('btn-refresh');
+  const langSelect   = document.getElementById('lang-select');
+  const btnSettings  = document.getElementById('btn-settings');
 
   // Set initial values
   dateInput.value = currentDate;
   dateInput.max = todayStr();
   sinceSelect.value = currentSince;
+
+  // Language filter (client-side)
+  langSelect.addEventListener('change', () => {
+    currentLanguage = langSelect.value;
+    if (tableRows.length) renderTable();
+  });
+
+  // Settings modal
+  btnSettings.addEventListener('click', openSettingsModal);
 
   // Date navigation
   btnPrev.addEventListener('click', () => {
@@ -464,6 +528,41 @@ function init() {
 
   // Initial load
   loadDashboard(currentDate, currentSince);
+}
+
+// ── Settings ────────────────────────────────────────────────────────────────
+
+function getSettings() {
+  try { return JSON.parse(localStorage.getItem('t2b_settings') || '{}'); }
+  catch { return {}; }
+}
+
+function saveSettings(s) {
+  localStorage.setItem('t2b_settings', JSON.stringify(s));
+}
+
+function openSettingsModal() {
+  const s = getSettings();
+  document.getElementById('settings-provider').value = s.ai_provider || 'anthropic';
+  document.getElementById('settings-api-key').value = s.ai_api_key || '';
+  document.getElementById('settings-auto-fetch').checked = !!s.auto_fetch;
+  document.getElementById('settings-modal').style.display = 'flex';
+}
+
+function closeSettingsModal() {
+  document.getElementById('settings-modal').style.display = 'none';
+}
+
+function saveSettingsModal() {
+  const s = {
+    ai_provider: document.getElementById('settings-provider').value,
+    ai_api_key:  document.getElementById('settings-api-key').value.trim(),
+    auto_fetch:  document.getElementById('settings-auto-fetch').checked,
+  };
+  saveSettings(s);
+  closeSettingsModal();
+  setStatus('设置已保存', 'success');
+  setTimeout(clearStatus, 2000);
 }
 
 // ── Keyword Modal ───────────────────────────────────────────────────────────
@@ -522,11 +621,19 @@ document.addEventListener('click', e => {
   if (e.target.id === 'kw-modal') closeKeywordModal();
 });
 
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') closeKeywordModal();
-});
-
 document.addEventListener('DOMContentLoaded', () => {
+  // Keyword modal
   document.getElementById('kw-modal-close').addEventListener('click', closeKeywordModal);
+
+  // Settings modal
+  document.getElementById('settings-close-btn').addEventListener('click', closeSettingsModal);
+  document.getElementById('settings-save-btn').addEventListener('click', saveSettingsModal);
+  document.getElementById('settings-modal').addEventListener('click', e => {
+    if (e.target.id === 'settings-modal') closeSettingsModal();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeSettingsModal(); closeKeywordModal(); }
+  });
+
   init();
 });
