@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import pathlib
 import re
 import subprocess
@@ -100,6 +101,10 @@ logger = logging.getLogger("trend2biz")
 APP_VERSION = "0.7.0"
 
 def _git_short_hash() -> str:
+    # Vercel 部署时无 .git 目录，优先读 Vercel 注入的 commit SHA
+    vercel_sha = os.environ.get("VERCEL_GIT_COMMIT_SHA", "")
+    if vercel_sha:
+        return vercel_sha[:7]
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -150,7 +155,11 @@ def ping() -> dict:
 
 @app.get("/api/v1/version")
 def version() -> dict:
-    return {"version": APP_VERSION, "build": APP_BUILD}
+    return {
+        "version": APP_VERSION,
+        "build": APP_BUILD,
+        "server_has_key": bool(settings.anthropic_api_key),
+    }
 
 
 # ---------------------------------------------------------------------------
