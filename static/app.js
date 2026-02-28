@@ -537,6 +537,13 @@ function init() {
 
   // Initial load
   loadDashboard(currentDate, currentSince);
+
+  // Version badge
+  apiFetch('/api/v1/version').then(r => r.ok ? r.json() : null).then(data => {
+    if (!data) return;
+    const el = document.getElementById('version-badge');
+    if (el) el.textContent = `v${data.version} · ${data.build}`;
+  }).catch(() => {});
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────
