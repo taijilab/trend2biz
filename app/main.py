@@ -1213,7 +1213,24 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     desc_zh = expl.get("description_zh") if biz else None
     bd_pitch = expl.get("bd_pitch") if biz else None
 
-    # Star history for chart
+    # Fallback Chinese description from biz profile when LLM didn't run
+    if not desc_zh and biz:
+        _cat_cn = {
+            "agent": "AI 智能体框架", "developer-tools": "开发者工具",
+            "security": "安全工具", "data": "数据处理工具",
+            "observability": "可观测性平台", "fintech": "金融科技工具",
+            "edu-tech": "教育科技产品", "biotech": "生命科学工具",
+            "infra": "基础设施", "ecommerce": "电商工具",
+        }.get(biz.category or "", biz.category or "开源项目")
+        _sc = "、".join((biz.scenarios or [])[:2]) or "多种应用场景"
+        _mn = "、".join((biz.monetization_candidates or [])[:2]) or "商业授权"
+        desc_zh = (
+            f"这是一款{_cat_cn}，面向 {biz.buyer or '技术团队'}，主要应用于{_sc}。"
+            f"潜在变现路径包括{_mn}。"
+            f"（以上为规则推断，使用 AI 模型分析后可获得更精准的中文解读）"
+        )
+
+    # Star history for chart — primary: RepoMetricDaily; fallback: TrendingSnapshotItem
     import json as _json
     metrics_rows = db.execute(
         select(RepoMetricDaily)
@@ -1222,6 +1239,18 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     ).scalars().all()
     star_dates = [str(r.metric_date) for r in metrics_rows if r.stars is not None]
     star_values = [r.stars for r in metrics_rows if r.stars is not None]
+
+    # Fallback: use trending snapshot stars_total_hint if no metric rows
+    if not star_dates:
+        trending_rows = db.execute(
+            select(TrendingSnapshotItem, TrendingSnapshot.snapshot_date)
+            .join(TrendingSnapshot, TrendingSnapshotItem.snapshot_id == TrendingSnapshot.snapshot_id)
+            .where(TrendingSnapshotItem.project_id == project.project_id)
+            .where(TrendingSnapshotItem.stars_total_hint.isnot(None))
+            .order_by(TrendingSnapshot.snapshot_date.asc())
+        ).all()
+        star_dates = [str(row[1]) for row in trending_rows]
+        star_values = [row[0].stars_total_hint for row in trending_rows]
 
     grade = score.grade if score else "N/A"
     total_score = score.total_score if score else None
