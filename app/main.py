@@ -546,12 +546,29 @@ def get_trending_snapshots(
 
 @app.post(f"{settings.api_prefix}/trending/snapshots:fetch", response_model=JobResp, status_code=202)
 def fetch_snapshot(payload: SnapshotFetchIn, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    job = create_job(
-        db=db,
-        job_type="trending_fetch",
-        payload={"since": payload.since, "language": payload.language, "spoken": payload.spoken, "date": str(date.today())},
-    )
-    db.commit()
+    # Idempotency: reuse an in-progress job for the same date/since/language/spoken
+    in_flight = db.execute(
+        select(Job).where(Job.job_type == "trending_fetch", Job.status.in_(["queued", "running"]))
+    ).scalars().all()
+    for j in in_flight:
+        p = j.payload or {}
+        if (p.get("since") == payload.since
+                and p.get("language") == payload.language
+                and p.get("spoken") == payload.spoken
+                and p.get("date") == str(date.today())):
+            return JobResp(job_id=j.job_id, status=j.status)
+
+    try:
+        job = create_job(
+            db=db,
+            job_type="trending_fetch",
+            payload={"since": payload.since, "language": payload.language, "spoken": payload.spoken, "date": str(date.today())},
+        )
+        db.commit()
+    except Exception as exc:
+        logger.error("fetch_snapshot: failed to create job: %s", exc)
+        db.rollback()
+        raise HTTPException(status_code=503, detail=f"抓取启动失败: {exc}")
     background_tasks.add_task(run_snapshot_fetch_job, job.job_id, payload.since, payload.language, payload.spoken, date.today())
     return JobResp(job_id=job.job_id, status=job.status)
 
