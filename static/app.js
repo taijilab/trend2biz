@@ -497,7 +497,7 @@ function init() {
   });
 
   // Settings modal
-  btnSettings.addEventListener('click', openSettingsModal);
+  btnSettings.addEventListener('click', () => openSettingsModal());
 
   // Date navigation
   btnPrev.addEventListener('click', () => {
