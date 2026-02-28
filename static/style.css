@@ -457,6 +457,20 @@ header {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.kw-bd-pitch {
+  font-size: 11px;
+  color: #b45309;
+  background: #fefce8;
+  border-left: 2px solid #f59e0b;
+  padding: 4px 8px;
+  margin-top: 4px;
+  border-radius: 0 4px 4px 0;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .kw-stars {
   font-size: 12px;
   color: var(--text-dim);
