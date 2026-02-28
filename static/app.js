@@ -379,7 +379,8 @@ function clearStatus() {
 window.startAnalysis = function(rowIdx) {
   const row = tableRows[rowIdx];
   if (!row || row._analyzing || !row.project_id) return;
-  if (!getSettings().ai_api_key) {
+  const s = getSettings();
+  if ((s.ai_model || 'rule-v1') === 'llm-v1' && !s.ai_api_key) {
     openSettingsModal(true);   // open settings with "no key" warning
     return;
   }
