@@ -956,6 +956,29 @@ footer {
   letter-spacing: 0.04em;
   margin-bottom: 6px;
 }
+.bd-tooltip-divider {
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
+}
+.bd-followup {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+.report-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 1px 3px;
+  border-radius: 4px;
+  color: var(--text-dim);
+  opacity: 0.6;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.report-btn:hover { opacity: 1; color: var(--accent); }
 @media (max-width: 640px) {
   .bd-tooltip { display: none !important; }
 }

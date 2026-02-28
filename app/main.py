@@ -16,7 +16,7 @@ from typing import Optional
 
 from dateutil.parser import isoparse
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import and_, desc, select, text
 from sqlalchemy.exc import IntegrityError
@@ -1082,6 +1082,9 @@ def project_detail(project_id: str, db: Session = Depends(get_db)):
                 "monetization": score.monetization_score,
                 "risk": score.risk_score,
             },
+            "followups":  score.followups  or [],
+            "highlights": score.highlights or [],
+            "risks":      score.risks      or [],
         }
         if score
         else None,
@@ -1333,6 +1336,14 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     db.add(report)
     db.commit()
     return ReportOut(report_id=report.report_id, url=f"/reports/{report.report_id}")
+
+
+@app.get("/reports/{report_id}", response_class=HTMLResponse)
+def get_report(report_id: str, db: Session = Depends(get_db)):
+    report = db.execute(select(Report).where(Report.report_id == report_id)).scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return HTMLResponse(content=report.content)
 
 
 @app.post(f"{settings.api_prefix}/watchlist", response_model=WatchlistItem)

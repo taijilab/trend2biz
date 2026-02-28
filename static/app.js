@@ -226,10 +226,11 @@ function analysisHtml(row, rowIdx) {
     const monoList = b && b.monetization_candidates ? b.monetization_candidates.slice(0, 3) : [];
     return `
       <div class="score-info">
-        ${grade ? `<div class="score-row">
-          ${gradeBadgeHtml(grade)}
+        <div class="score-row">
+          ${grade ? gradeBadgeHtml(grade) : ''}
           ${total ? `<span class="score-num">${total}</span>` : ''}
-        </div>` : ''}
+          ${row.project_id ? `<button class="report-btn" onclick="generateReport('${row.project_id}')" title="生成一页报告">&#128196;</button>` : ''}
+        </div>
         ${catVal ? `<button class="kw-tag kw-cat" data-kw="${escHtml(catVal)}">${escHtml(catVal)}</button>` : ''}
         ${monoList.length ? `<div class="kw-tags">${monoList.map(m => `<button class="kw-tag kw-mono" data-kw="${escHtml(m)}">${escHtml(m)}</button>`).join('')}</div>` : ''}
       </div>`;
@@ -390,6 +391,25 @@ window.startAnalysis = function(rowIdx) {
     return;
   }
   analyzeProject(row.project_id, rowIdx);
+};
+
+window.generateReport = async function(projectId) {
+  setStatus('正在生成报告…', 'info');
+  try {
+    const r = await apiFetch(`${API}/reports:generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId, format: 'html', latest: true }),
+    });
+    if (!r.ok) { setStatus('报告生成失败', 'error'); setTimeout(clearStatus, 3000); return; }
+    const { job_id, url } = await r.json();
+    if (job_id) await pollJob(job_id);
+    clearStatus();
+    if (url) window.open(url, '_blank');
+  } catch (err) {
+    setStatus(`报告生成失败: ${err.message}`, 'error');
+    setTimeout(clearStatus, 3000);
+  }
 };
 
 // ── Main Load Flow ─────────────────────────────────────────────────────────
@@ -687,7 +707,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const r = tableRows[rowIdx];
     const pitch = r && r.biz && r.biz.bd_pitch;
     if (!pitch) { bdTooltip.style.display = 'none'; return; }
-    bdTooltip.innerHTML = `<div class="bd-tooltip-label">💬 BD 话术</div>${escHtml(pitch)}`;
+    const followups = (r.score && r.score.followups) || [];
+    const followupHtml = followups.length
+      ? `<div class="bd-tooltip-divider"></div><div class="bd-tooltip-label">🔍 追问清单</div>` +
+        followups.map((q, i) => `<div class="bd-followup">${i + 1}. ${escHtml(q)}</div>`).join('')
+      : '';
+    bdTooltip.innerHTML = `<div class="bd-tooltip-label">💬 BD 话术</div>${escHtml(pitch)}${followupHtml}`;
     bdTooltip.style.display = 'block';
     const tw = bdTooltip.offsetWidth, th = bdTooltip.offsetHeight;
     let x = e.clientX + 18, y = e.clientY + 14;
