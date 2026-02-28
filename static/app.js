@@ -207,16 +207,16 @@ function analysisHtml(row, rowIdx) {
     const b = row.biz;
     const grade = s ? (s.grade || '?') : null;
     const total = s && typeof s.total === 'number' ? s.total.toFixed(1) : null;
-    const cat = b ? (b.category || '') : '';
-    const mono = b && b.monetization_candidates ? b.monetization_candidates.slice(0, 2).join(', ') : '';
+    const catVal = b ? (b.category || '') : '';
+    const monoList = b && b.monetization_candidates ? b.monetization_candidates.slice(0, 3) : [];
     return `
       <div class="score-info">
         ${grade ? `<div class="score-row">
           ${gradeBadgeHtml(grade)}
           ${total ? `<span class="score-num">${total}</span>` : ''}
         </div>` : ''}
-        ${cat ? `<span class="biz-category">${cat}</span>` : ''}
-        ${mono ? `<span class="biz-monetization">${mono}</span>` : ''}
+        ${catVal ? `<button class="kw-tag kw-cat" data-kw="${escHtml(catVal)}">${escHtml(catVal)}</button>` : ''}
+        ${monoList.length ? `<div class="kw-tags">${monoList.map(m => `<button class="kw-tag kw-mono" data-kw="${escHtml(m)}">${escHtml(m)}</button>`).join('')}</div>` : ''}
       </div>`;
   }
 
@@ -466,4 +466,67 @@ function init() {
   loadDashboard(currentDate, currentSince);
 }
 
-document.addEventListener('DOMContentLoaded', init);
+// ── Keyword Modal ───────────────────────────────────────────────────────────
+
+function openKeywordModal(keyword) {
+  const matches = tableRows.filter(r => {
+    if (!r.biz) return false;
+    return r.biz.category === keyword
+      || (r.biz.scenarios || []).includes(keyword)
+      || (r.biz.monetization_candidates || []).includes(keyword)
+      || (r.biz.delivery_forms || []).includes(keyword);
+  });
+
+  document.getElementById('kw-modal-title').textContent = `"${keyword}" — ${matches.length} 个项目`;
+
+  const body = document.getElementById('kw-modal-body');
+  if (!matches.length) {
+    body.innerHTML = '<p class="kw-empty">暂无匹配项目</p>';
+  } else {
+    body.innerHTML = matches.map(r => {
+      const parts = r.repo_full_name.split('/');
+      const owner = parts[0] || '';
+      const name = parts[1] || r.repo_full_name;
+      const desc = (r.biz && r.biz.description_zh) || r.description || '';
+      const grade = r.score ? r.score.grade : null;
+      const stars = r.stars_total != null ? r.stars_total.toLocaleString() : '—';
+      return `<div class="kw-project-row">
+        ${grade ? gradeBadgeHtml(grade) : '<span style="width:24px;flex-shrink:0"></span>'}
+        <div class="kw-project-info">
+          <a class="kw-repo-link" href="https://github.com/${r.repo_full_name}" target="_blank">
+            <span class="repo-owner">${escHtml(owner)}/</span>${escHtml(name)}
+          </a>
+          ${desc ? `<div class="kw-desc">${escHtml(desc)}</div>` : ''}
+        </div>
+        <span class="kw-stars">&#9733; ${stars}</span>
+      </div>`;
+    }).join('');
+  }
+
+  document.getElementById('kw-modal').style.display = 'flex';
+}
+
+function closeKeywordModal() {
+  document.getElementById('kw-modal').style.display = 'none';
+}
+
+// Event delegation: kw-tag clicks anywhere in the document
+document.addEventListener('click', e => {
+  const tag = e.target.closest('[data-kw]');
+  if (tag) {
+    e.stopPropagation();
+    openKeywordModal(tag.dataset.kw);
+    return;
+  }
+  // Click on the backdrop (the modal overlay itself) closes it
+  if (e.target.id === 'kw-modal') closeKeywordModal();
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeKeywordModal();
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('kw-modal-close').addEventListener('click', closeKeywordModal);
+  init();
+});
