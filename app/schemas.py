@@ -55,7 +55,7 @@ class ProjectListItem(BaseModel):
     repo_full_name: str
     primary_language: Optional[str]
     latest_score: Optional[dict]
-    latest_biz: Optional[dict]
+    latest_biz_profile: Optional[dict]
 
 
 class ProjectListResp(BaseModel):

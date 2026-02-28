@@ -6,6 +6,8 @@ import logging
 import pathlib
 import sys
 import time
+
+import httpx
 from datetime import date, datetime
 from typing import Optional
 
@@ -261,8 +263,29 @@ def upsert_score(db: Session, project: Project, model: str, biz_id: Optional[str
     return score
 
 
+def translate_to_zh(text: str) -> Optional[str]:
+    """Translate text to Simplified Chinese via MyMemory free API (no key required)."""
+    if not text or not text.strip():
+        return None
+    if any('\u4e00' <= c <= '\u9fff' for c in text):
+        return text  # already Chinese
+    try:
+        r = httpx.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": text[:500], "langpair": "en|zh-CN"},
+            timeout=10,
+        )
+        result = r.json().get("responseData", {}).get("translatedText")
+        return result if result else None
+    except Exception:
+        return None
+
+
 def generate_biz_and_score(db: Session, project: Project, model: str = "rule-v1") -> tuple[BizProfile, ProjectScore]:
     biz_data = infer_biz_profile(project.repo_full_name, project.description, project.primary_language)
+    desc_zh = translate_to_zh(project.description)
+    if desc_zh:
+        biz_data["explanations"]["description_zh"] = desc_zh
     biz = BizProfile(project_id=project.project_id, model_name=model, **biz_data)
     db.add(biz)
     db.flush()
@@ -641,9 +664,11 @@ def list_projects(
                 repo_full_name=p.repo_full_name,
                 primary_language=p.primary_language,
                 latest_score={"total": score.total_score, "grade": score.grade} if score else None,
-                latest_biz={
+                latest_biz_profile={
                     "category": biz.category,
+                    "scenarios": biz.scenarios,
                     "monetization_candidates": biz.monetization_candidates,
+                    "description_zh": biz.explanations.get("description_zh") if biz.explanations else None,
                 }
                 if biz
                 else None,
@@ -687,9 +712,11 @@ def project_detail(project_id: str, db: Session = Depends(get_db)):
         else None,
         latest_biz_profile={
             "category": biz.category,
+            "scenarios": biz.scenarios,
             "value_props": biz.value_props,
             "buyer": biz.buyer,
             "monetization_candidates": biz.monetization_candidates,
+            "description_zh": biz.explanations.get("description_zh") if biz.explanations else None,
         }
         if biz
         else None,
