@@ -932,3 +932,30 @@ footer {
   .date-input { max-width: 110px; }
   .lang-select { max-width: 90px; }
 }
+
+/* BD Pitch Tooltip */
+.bd-tooltip {
+  position: fixed;
+  z-index: 300;
+  max-width: 300px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  pointer-events: none;
+}
+.bd-tooltip-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+@media (max-width: 640px) {
+  .bd-tooltip { display: none !important; }
+}

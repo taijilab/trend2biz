@@ -275,6 +275,7 @@ function buildTableHtml(rowPairs) {
     const deltaClass = row.stars_delta ? '' : 'none';
     const totalStars = row.stars_total != null ? row.stars_total.toLocaleString() : '—';
     const rowClass = row.analyzed ? 'analyzed' : (row._analyzing ? 'analyzing' : '');
+    const bdPitch = (row.biz && row.biz.bd_pitch) || '';
     const chineseDesc = (row.biz && row.biz.description_zh)
       ? row.biz.description_zh
       : (row.biz && row.biz.scenarios && row.biz.scenarios.length)
@@ -283,7 +284,7 @@ function buildTableHtml(rowPairs) {
     const descText = chineseDesc || row.description;
 
     html += `
-      <tr class="trend-row ${rowClass}" id="row-${idx}" data-lang="${lang}">
+      <tr class="trend-row ${rowClass}" id="row-${idx}" data-lang="${lang}"${bdPitch ? ` data-rowidx="${idx}"` : ''}>
         <td class="col-rank"><div class="cell"><span class="rank-num">${row.rank}</span></div></td>
         <td class="col-repo">
           <div class="cell" style="flex-direction:column;align-items:flex-start;gap:2px;">
@@ -675,6 +676,25 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { closeSettingsModal(); closeKeywordModal(); }
+  });
+
+  // BD pitch tooltip on analyzed rows
+  const bdTooltip = document.getElementById('bd-tooltip');
+  document.addEventListener('mousemove', e => {
+    const tr = e.target.closest('tr[data-rowidx]');
+    if (!tr) { bdTooltip.style.display = 'none'; return; }
+    const rowIdx = parseInt(tr.dataset.rowidx, 10);
+    const r = tableRows[rowIdx];
+    const pitch = r && r.biz && r.biz.bd_pitch;
+    if (!pitch) { bdTooltip.style.display = 'none'; return; }
+    bdTooltip.innerHTML = `<div class="bd-tooltip-label">💬 BD 话术</div>${escHtml(pitch)}`;
+    bdTooltip.style.display = 'block';
+    const tw = bdTooltip.offsetWidth, th = bdTooltip.offsetHeight;
+    let x = e.clientX + 18, y = e.clientY + 14;
+    if (x + tw > window.innerWidth - 8) x = e.clientX - tw - 14;
+    if (y + th > window.innerHeight - 8) y = e.clientY - th - 14;
+    bdTooltip.style.left = x + 'px';
+    bdTooltip.style.top  = y + 'px';
   });
 
   init();
