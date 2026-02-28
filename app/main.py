@@ -18,7 +18,7 @@ from dateutil.parser import isoparse
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, desc, select, text
+from sqlalchemy import and_, desc, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -670,6 +670,33 @@ def _do_metrics_refresh(db: Session, project_id: str, metric_date: date) -> None
         raise ValueError(f"project {project_id} not found")
     refresh_metrics_for_project(db, project, metric_date)
 
+    # Backfill star history from GitHub Stargazers API (star-history.com technique).
+    # Only run if we have ≤ 2 existing records to avoid re-fetching on every refresh.
+    existing_count = db.execute(
+        select(func.count()).select_from(RepoMetricDaily).where(RepoMetricDaily.project_id == project_id)
+    ).scalar() or 0
+    if existing_count <= 2:
+        try:
+            history = fetch_star_history(project.repo_full_name, token=settings.github_token)
+            for date_str, stars in history:
+                hist_date = date.fromisoformat(date_str)
+                if hist_date == metric_date:
+                    continue  # today's record already created by refresh_metrics_for_project
+                exists = db.execute(
+                    select(RepoMetricDaily).where(
+                        and_(RepoMetricDaily.project_id == project_id, RepoMetricDaily.metric_date == hist_date)
+                    )
+                ).scalar_one_or_none()
+                if not exists:
+                    db.add(RepoMetricDaily(
+                        project_id=project_id,
+                        metric_date=hist_date,
+                        stars=stars,
+                        captured_at=datetime.utcnow(),
+                    ))
+        except Exception as exc:
+            logger.warning("star history backfill failed for %s: %s", project.repo_full_name, exc)
+
 
 def _do_biz_generate(db: Session, project_id: str, model: str, api_key: Optional[str] = None, provider: Optional[str] = None) -> None:
     project = db.get(Project, project_id)
@@ -1235,29 +1262,21 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     # Priority 2: RepoMetricDaily — daily snapshots from past metric refreshes
     # Priority 3: TrendingSnapshotItem.stars_total_hint — sparse but always available
     import json as _json
+    # Star history: read from DB (backfilled by metrics:refresh via fetch_star_history).
+    # Fallback to TrendingSnapshotItem if no metric rows exist.
     star_dates: list[str] = []
     star_values: list[int] = []
     star_source = ""
 
-    try:
-        history = fetch_star_history(project.repo_full_name, token=settings.github_token)
-        if history:
-            star_dates = [h[0] for h in history]
-            star_values = [h[1] for h in history]
-            star_source = "GitHub Stargazers API"
-    except Exception:
-        pass
-
-    if not star_dates:
-        metrics_rows = db.execute(
-            select(RepoMetricDaily)
-            .where(RepoMetricDaily.project_id == project.project_id)
-            .order_by(RepoMetricDaily.metric_date.asc())
-        ).scalars().all()
-        star_dates = [str(r.metric_date) for r in metrics_rows if r.stars is not None]
-        star_values = [r.stars for r in metrics_rows if r.stars is not None]
-        if star_dates:
-            star_source = "每日指标快照"
+    metrics_rows = db.execute(
+        select(RepoMetricDaily)
+        .where(RepoMetricDaily.project_id == project.project_id)
+        .order_by(RepoMetricDaily.metric_date.asc())
+    ).scalars().all()
+    star_dates = [str(r.metric_date) for r in metrics_rows if r.stars is not None]
+    star_values = [r.stars for r in metrics_rows if r.stars is not None]
+    if star_dates:
+        star_source = "GitHub Stargazers API" if len(star_dates) > 2 else "每日指标快照"
 
     if not star_dates:
         trending_rows = db.execute(
