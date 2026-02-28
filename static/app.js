@@ -257,9 +257,11 @@ function buildTableHtml(rows) {
     const deltaClass = row.stars_delta ? '' : 'none';
     const totalStars = row.stars_total != null ? row.stars_total.toLocaleString() : '—';
     const rowClass = row.analyzed ? 'analyzed' : (row._analyzing ? 'analyzing' : '');
-    const chineseDesc = row.biz && row.biz.scenarios && row.biz.scenarios.length
-      ? row.biz.scenarios.slice(0, 2).join(' · ')
-      : null;
+    const chineseDesc = (row.biz && row.biz.description_zh)
+      ? row.biz.description_zh
+      : (row.biz && row.biz.scenarios && row.biz.scenarios.length)
+        ? row.biz.scenarios.slice(0, 2).join(' · ')
+        : null;
     const descText = chineseDesc || row.description;
 
     html += `
