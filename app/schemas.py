@@ -29,6 +29,9 @@ class SnapshotItemOut(BaseModel):
     stars_total_hint: Optional[int]
     forks_total_hint: Optional[int]
     stars_delta_window: Optional[int]
+    project_id: Optional[str] = None
+    latest_biz: Optional[dict] = None
+    latest_score: Optional[dict] = None
 
 
 class SnapshotOut(BaseModel):

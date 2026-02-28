@@ -80,15 +80,10 @@ async function fetchProjectDetail(projectId) {
   return await res.json();
 }
 
-function mergeRows(snapshotItems, projects) {
-  // Build name→project map
-  const projMap = {};
-  for (const p of projects) {
-    projMap[p.repo_full_name] = p;
-  }
-
+// Snapshot items now include project_id, latest_biz, latest_score from the backend —
+// no separate projects fetch required.
+function mergeRows(snapshotItems) {
   return snapshotItems.map(si => {
-    const proj = projMap[si.repo_full_name] || null;
     return {
       rank: si.rank,
       repo_full_name: si.repo_full_name,
@@ -96,10 +91,10 @@ function mergeRows(snapshotItems, projects) {
       primary_language: si.primary_language,
       stars_delta: si.stars_delta_window,
       stars_total: si.stars_total_hint,
-      project_id: proj ? proj.project_id : null,
-      analyzed: proj && (proj.latest_score !== null || proj.latest_biz_profile !== null),
-      score: proj ? proj.latest_score : null,
-      biz: proj ? proj.latest_biz_profile : null,
+      project_id: si.project_id || null,
+      analyzed: !!(si.latest_score || si.latest_biz),
+      score: si.latest_score || null,
+      biz: si.latest_biz || null,
     };
   }).sort((a, b) => a.rank - b.rank);
 }
@@ -172,6 +167,11 @@ async function autoAnalyzeAll() {
   const queue = tableRows
     .map((row, idx) => ({ row, idx }))
     .filter(({ row }) => !row.analyzed && row.project_id);
+
+  if (queue.length && !getSettings().ai_api_key) {
+    setStatus('提示：未配置 API Key，将使用免费翻译（质量较低）。点击 ⚙ 在设置中配置。', 'info');
+    setTimeout(clearStatus, 7000);
+  }
 
   // Mark all as waiting and update UI
   for (const { row, idx } of queue) {
@@ -373,6 +373,10 @@ function clearStatus() {
 window.startAnalysis = function(rowIdx) {
   const row = tableRows[rowIdx];
   if (!row || row._analyzing || !row.project_id) return;
+  if (!getSettings().ai_api_key) {
+    openSettingsModal(true);   // open settings with "no key" warning
+    return;
+  }
   analyzeProject(row.project_id, rowIdx);
 };
 
@@ -444,9 +448,8 @@ async function loadDashboard(date, since, forceRefetch = false) {
       }
     }
 
-    // Fetch projects for biz/score merge
-    const projects = await fetchProjects();
-    tableRows = mergeRows(snapshotItems, projects);
+    // Snapshot items already include project_id + biz + score from the enriched API
+    tableRows = mergeRows(snapshotItems);
 
     renderTable();
     document.getElementById('footer-info').textContent =
@@ -541,12 +544,14 @@ function saveSettings(s) {
   localStorage.setItem('t2b_settings', JSON.stringify(s));
 }
 
-function openSettingsModal() {
+function openSettingsModal(warnNoKey = false) {
   const s = getSettings();
   document.getElementById('settings-provider').value = s.ai_provider || 'anthropic';
   document.getElementById('settings-api-key').value = s.ai_api_key || '';
   document.getElementById('settings-auto-fetch').checked = !!s.auto_fetch;
+  document.getElementById('settings-nokey-warn').style.display = warnNoKey ? 'block' : 'none';
   document.getElementById('settings-modal').style.display = 'flex';
+  if (warnNoKey) document.getElementById('settings-api-key').focus();
 }
 
 function closeSettingsModal() {

@@ -661,6 +661,16 @@ footer {
   line-height: 1.5;
   margin: 0;
 }
+.settings-warn {
+  background: rgba(248,113,113,0.1);
+  border: 1px solid rgba(248,113,113,0.35);
+  color: var(--danger);
+  padding: 9px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
 .settings-toggle-row {
   display: flex;
   align-items: center;
