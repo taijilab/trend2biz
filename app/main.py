@@ -1213,6 +1213,16 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     desc_zh = expl.get("description_zh") if biz else None
     bd_pitch = expl.get("bd_pitch") if biz else None
 
+    # Star history for chart
+    import json as _json
+    metrics_rows = db.execute(
+        select(RepoMetricDaily)
+        .where(RepoMetricDaily.project_id == project.project_id)
+        .order_by(RepoMetricDaily.metric_date.asc())
+    ).scalars().all()
+    star_dates = [str(r.metric_date) for r in metrics_rows if r.stars is not None]
+    star_values = [r.stars for r in metrics_rows if r.stars is not None]
+
     grade = score.grade if score else "N/A"
     total_score = score.total_score if score else None
     generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
@@ -1244,17 +1254,71 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         for item in (biz.delivery_forms or [])[:3]:
             biz_tags_html += f'<span class="tag" style="background:#dcfce7;color:#166534">{item}</span>'
 
+    en_desc = project.description or ""
+    en_block = (
+        f'<p style="font-size:13px;color:#64748b;margin:0 0 10px;font-style:italic">'
+        f'🌐 {en_desc}</p>'
+    ) if en_desc else ""
+    zh_block = f'<div class="desc">{desc_zh}</div>' if desc_zh else ""
     desc_section = (
-        f'<div class="card"><h2>项目介绍</h2>'
-        f'<div class="desc">{desc_zh}</div></div>'
-    ) if desc_zh else (
-        f'<div class="card"><h2>项目介绍</h2>'
-        f'<p style="color:#374151;font-size:14px">{project.description or ""}</p></div>'
-    ) if project.description else ""
+        f'<div class="card"><h2>项目介绍</h2>{en_block}{zh_block}</div>'
+    ) if (en_desc or desc_zh) else ""
 
     bd_section = (
         f'<div class="card"><h2>BD 话术</h2><div class="bd-pitch">{bd_pitch}</div></div>'
     ) if bd_pitch else ""
+
+    # Sales motion & confidence notes
+    _motion_desc = {
+        "PLG": "产品驱动增长（Product-Led Growth）— 用户自助发现、体验并付费，无需大量销售介入；适合开发者工具、基础设施、AI 框架等面向技术受众的产品",
+        "Enterprise": "企业直销 — 依靠专职销售团队主动拓展企业合同；适合安全、合规、生命科学等需要深度定制和采购审批的场景",
+    }.get(biz.sales_motion if biz else "", "")
+    _confidence_note = "置信度反映规则匹配的确定性：65% 为基于项目类别关键词的初步推断，经 AI 精细分析后可提升至 80%+"
+    motion_note_html = (
+        f'<p style="font-size:11px;color:#94a3b8;margin:8px 0 0;line-height:1.6;border-top:1px solid #f1f5f9;padding-top:8px">'
+        f'<strong>运动说明：</strong>{_motion_desc}</p>'
+        f'<p style="font-size:11px;color:#94a3b8;margin:4px 0 0;line-height:1.6">'
+        f'<strong>置信度说明：</strong>{_confidence_note}</p>'
+    ) if biz else ""
+
+    # Star history chart section
+    star_chart_section = (
+        '<div class="card"><h2>Star 增长历史</h2>'
+        '<canvas id="starChart" style="max-height:180px"></canvas></div>'
+    ) if star_dates else ""
+    chart_script = (
+        f'<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>\n'
+        f'<script>\n'
+        f'(function(){{\n'
+        f'  var el = document.getElementById("starChart");\n'
+        f'  if (!el) return;\n'
+        f'  new Chart(el, {{\n'
+        f'    type: "line",\n'
+        f'    data: {{\n'
+        f'      labels: {_json.dumps(star_dates)},\n'
+        f'      datasets: [{{\n'
+        f'        label: "Stars",\n'
+        f'        data: {_json.dumps(star_values)},\n'
+        f'        borderColor: "#0f3460",\n'
+        f'        backgroundColor: "rgba(15,52,96,0.08)",\n'
+        f'        borderWidth: 2,\n'
+        f'        pointRadius: 2,\n'
+        f'        tension: 0.3,\n'
+        f'        fill: true\n'
+        f'      }}]\n'
+        f'    }},\n'
+        f'    options: {{\n'
+        f'      responsive: true,\n'
+        f'      plugins: {{ legend: {{ display: false }} }},\n'
+        f'      scales: {{\n'
+        f'        x: {{ ticks: {{ maxTicksLimit: 8, font: {{ size: 10 }} }} }},\n'
+        f'        y: {{ ticks: {{ font: {{ size: 10 }} }} }}\n'
+        f'      }}\n'
+        f'    }}\n'
+        f'  }});\n'
+        f'}})();\n'
+        f'</script>'
+    ) if star_dates else ""
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1317,9 +1381,12 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
       <strong>运动：</strong>{biz.sales_motion if biz else "N/A"} &nbsp;·&nbsp;
       <strong>置信度：</strong>{f"{biz.confidence:.0%}" if biz and biz.confidence else "N/A"}
     </p>
+    {motion_note_html}
   </div>
 
   {bd_section}
+
+  {star_chart_section}
 
   <div class="two-col">
     <div class="card"><h2>亮点</h2><ul>{highlights_html}</ul></div>
@@ -1329,6 +1396,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
   <div class="card"><h2>追问清单</h2><ul>{followups_html}</ul></div>
 
   <div class="footer">Trend2Biz · 数据来源 GitHub Trending · 分析仅供参考</div>
+{chart_script}
 </body>
 </html>"""
 
