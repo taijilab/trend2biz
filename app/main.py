@@ -203,6 +203,8 @@ def _migrate_add_missing_columns() -> None:
     migrations = [
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 3",
+        "ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_login VARCHAR(255)",
+        "ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_type VARCHAR(50)",
     ]
     with engine.connect() as conn:
         for sql in migrations:
@@ -370,6 +372,10 @@ def refresh_metrics_for_project(db: Session, project: Project, metric_date: date
     project.description = data.get("description") or project.description
     project.primary_language = data.get("primary_language") or project.primary_language
     project.license_spdx = data.get("license_spdx") or project.license_spdx
+    if data.get("owner_login"):
+        project.owner_login = data["owner_login"]
+    if data.get("owner_type"):
+        project.owner_type = data["owner_type"]
     if data.get("created_at_github"):
         project.created_at_github = isoparse(data["created_at_github"])
     if data.get("updated_at_github"):
@@ -1648,8 +1654,16 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
 
     # ── section: 项目概况 ─────────────────────────────────────────────────────
     first_date = star_dates[0][:7] if star_dates else "—"
+    _otype = project.owner_type or "—"
+    _ologin = project.owner_login or (project.repo_full_name.split("/")[0] if "/" in project.repo_full_name else "—")
+    _owner_html = (
+        f'<a href="https://github.com/{_ologin}" style="color:#0f3460">{_ologin}</a>'
+        f' <span style="color:#94a3b8;font-size:11px">({_otype})</span>'
+    )
     overview_rows = [
         ("仓库", f'<a href="{project.repo_url}" style="color:#0f3460">{project.repo_full_name}</a>'),
+        ("所属账号", _owner_html),
+        ("账号类型", "企业/组织 (Organization)" if _otype == "Organization" else ("个人 (User)" if _otype == "User" else "—")),
         ("主语言", project.primary_language or "—"),
         ("首次上榜", first_date),
         ("当前 Stars", fmt_num(cur_stars)),
@@ -1787,7 +1801,19 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     # ── section: team & community ────────────────────────────────────────────
     team_grade  = s2g(score.team_score if score else None)
     bd_pitch    = expl.get("bd_pitch") or ""
+
+    # owner / company context
+    _owner_login = project.owner_login or (project.repo_full_name.split("/")[0] if "/" in project.repo_full_name else None)
+    _owner_type  = project.owner_type or "Unknown"
+    if _owner_type == "Organization":
+        _owner_label = f"组织维护（GitHub Org: [{_owner_login}](https://github.com/{_owner_login})）"
+    elif _owner_type == "User":
+        _owner_label = f"个人维护（GitHub User: [{_owner_login}](https://github.com/{_owner_login})）"
+    else:
+        _owner_label = f"维护者：{_owner_login or '—'}"
+
     team_bullets = [
+        _owner_label,
         f"近 90 天贡献者数：{fmt_num(cur_contribs)}",
         f"主维护者集中度：{pct(bus_factor)}（>50% 表示单点风险）" if bus_factor else "主维护者集中度：数据待采集",
         f"团队信号：{signals.get('team', '—')}",
@@ -1946,6 +1972,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
 
     _overview_md_rows = [
         ("仓库", project.repo_url),
+        ("所属账号", f"{_ologin} ({_otype})"),
         ("主语言", project.primary_language or "—"),
         ("当前 Stars", fmt_num(cur_stars)),
         ("Forks", fmt_num(cur_forks)),
