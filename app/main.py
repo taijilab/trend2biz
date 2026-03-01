@@ -2209,6 +2209,20 @@ def get_report(report_id: str, db: Session = Depends(get_db)):
     return HTMLResponse(content=report.content)
 
 
+@app.get(f"{settings.api_prefix}/reports/{{report_id}}/markdown", response_class=Response)
+def get_report_markdown(report_id: str, db: Session = Depends(get_db)):
+    """Return the markdown content embedded in the report HTML (for CLI / skill use)."""
+    import re as _re
+    report = db.execute(select(Report).where(Report.report_id == report_id)).scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    m = _re.search(r'var _mdB64 = "([A-Za-z0-9+/=]+)"', report.content)
+    if not m:
+        raise HTTPException(status_code=404, detail="Markdown not found in report")
+    md_bytes = base64.b64decode(m.group(1))
+    return Response(content=md_bytes, media_type="text/markdown; charset=utf-8")
+
+
 @app.get(f"{settings.api_prefix}/projects/search")
 def search_projects(
     q: str = Query(..., min_length=1, max_length=100),
