@@ -10,9 +10,14 @@ const POLL_TIMEOUT = 120000;
 let currentDate = todayStr();
 let currentSince = 'daily';
 let currentLanguage = '';   // '' = all languages (client-side filter)
+let currentView = 'trending';  // 'trending' | 'watchlist' | 'search'
 let tableRows = [];   // merged rows
+let watchlistSet = new Set();  // project_ids currently in watchlist
+let searchResults = [];        // rows from search API
 let _pendingAnalysisRowIdx = null;   // set when warning modal opens with a pending row
 let _serverHasKey = false;           // populated from /api/v1/version on init
+let _serverHasGithubToken = false;
+let _snapshotCapturedAt = null;      // ISO string of current snapshot's captured_at
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 
@@ -26,8 +31,23 @@ function shiftDate(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 
+function _getAccessToken() {
+  try { return localStorage.getItem('t2b_access_token') || ''; } catch { return ''; }
+}
+
 async function apiFetch(path, options = {}) {
+  const token = _getAccessToken();
+  if (token) {
+    options.headers = Object.assign({ 'Authorization': `Bearer ${token}` }, options.headers || {});
+  }
   const res = await fetch(path, options);
+  if (res.status === 401) {
+    const tok = prompt('🔒 此实例需要访问密码，请输入 Access Token:');
+    if (tok) {
+      try { localStorage.setItem('t2b_access_token', tok); } catch {}
+      return apiFetch(path, options);
+    }
+  }
   return res;
 }
 
@@ -58,6 +78,7 @@ async function fetchSnapshotItems(date, since) {
   if (res.status === 404) return null;   // no data for this date
   if (!res.ok) throw new Error(`Snapshot fetch error: ${res.status}`);
   const data = await res.json();
+  _snapshotCapturedAt = data.snapshot ? data.snapshot.captured_at : null;
   return data.items || [];
 }
 
@@ -82,6 +103,112 @@ async function fetchProjectDetail(projectId) {
   return await res.json();
 }
 
+async function loadWatchlist() {
+  try {
+    const res = await apiFetch(`${API}/watchlist`);
+    if (!res.ok) return;
+    const data = await res.json();
+    watchlistSet = new Set((data.items || []).map(w => w.project_id));
+  } catch { /* ignore */ }
+}
+
+async function toggleWatchlist(projectId, rowIdx) {
+  const inList = watchlistSet.has(projectId);
+  try {
+    if (inList) {
+      await apiFetch(`${API}/watchlist/${projectId}`, { method: 'DELETE' });
+      watchlistSet.delete(projectId);
+    } else {
+      await apiFetch(`${API}/watchlist`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: projectId }),
+      });
+      watchlistSet.add(projectId);
+    }
+    // Update just the star icon for this row
+    const starBtn = document.querySelector(`.watch-btn[data-pid="${projectId}"]`);
+    if (starBtn) starBtn.textContent = watchlistSet.has(projectId) ? '★' : '☆';
+    // If we're in watchlist view and we just removed, re-render
+    if (currentView === 'watchlist' && !watchlistSet.has(projectId)) renderTable();
+  } catch (e) {
+    setStatus(`关注列表操作失败: ${e.message}`, 'error');
+    setTimeout(clearStatus, 3000);
+  }
+}
+
+function showFreshness(capturedAtIso) {
+  const el = document.getElementById('freshness-indicator');
+  if (!el) return;
+  if (!capturedAtIso) { el.textContent = ''; el.className = 'freshness-indicator'; return; }
+  const now = Date.now();
+  const then = new Date(capturedAtIso).getTime();
+  const diffMs = now - then;
+  const diffH = diffMs / 3600000;
+  let label, cls;
+  if (diffH < 2) {
+    const m = Math.round(diffMs / 60000);
+    label = `📡 ${m}分钟前采集`;
+    cls = 'freshness-indicator fresh';
+  } else if (diffH < 24) {
+    label = `📡 ${Math.floor(diffH)}小时前采集`;
+    cls = 'freshness-indicator stale';
+  } else {
+    const d = Math.floor(diffH / 24);
+    label = `⚠️ ${d}天前采集`;
+    cls = 'freshness-indicator old';
+  }
+  el.textContent = label;
+  el.className = cls;
+}
+
+async function doSearch(q) {
+  if (!q || !q.trim()) return;
+  currentView = 'search';
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>搜索中...</span></div>';
+  try {
+    const res = await apiFetch(`${API}/projects/search?${new URLSearchParams({ q, limit: 30 })}`);
+    if (!res.ok) throw new Error(`Search error: ${res.status}`);
+    const data = await res.json();
+    searchResults = (data.items || []).map(p => ({
+      rank: null,
+      repo_full_name: p.repo_full_name,
+      description: null,
+      primary_language: p.primary_language,
+      stars_delta: null,
+      stars_total: null,
+      project_id: p.project_id,
+      analyzed: !!(p.latest_score || p.latest_biz_profile),
+      score: p.latest_score || null,
+      biz: p.latest_biz_profile || null,
+    }));
+    tableRows = searchResults;
+    renderTable();
+    document.getElementById('footer-info').textContent = `搜索 "${q}" · ${searchResults.length} 个结果`;
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><h3>搜索失败</h3><p>${escHtml(e.message)}</p></div>`;
+  }
+}
+
+async function doExport(fmt) {
+  const params = new URLSearchParams({ since: currentSince, date: currentDate, format: fmt });
+  try {
+    const res = await apiFetch(`${API}/trending/snapshots/export?${params}`);
+    if (!res.ok) { alert('导出失败：' + res.status); return; }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `trend2biz-${currentDate}-${currentSince}.${fmt}`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+  } catch (e) {
+    alert('导出失败：' + e.message);
+  }
+}
+
 // Snapshot items now include project_id, latest_biz, latest_score from the backend —
 // no separate projects fetch required.
 function mergeRows(snapshotItems) {
@@ -99,6 +226,13 @@ function mergeRows(snapshotItems) {
       biz: si.latest_biz || null,
     };
   }).sort((a, b) => a.rank - b.rank);
+}
+
+function getDisplayRows() {
+  if (currentView === 'watchlist') {
+    return tableRows.filter(r => r.project_id && watchlistSet.has(r.project_id));
+  }
+  return tableRows;
 }
 
 // ── Trigger Trending Fetch ─────────────────────────────────────────────────
@@ -245,18 +379,25 @@ function analysisHtml(row, rowIdx) {
 
 // rowPairs: [{row, idx}] where idx is the original index in tableRows
 function buildTableHtml(rowPairs) {
-  if (!rowPairs.length) return '<div class="empty-state"><p>无匹配项目</p></div>';
+  if (!rowPairs.length) {
+    const emptyMsg = currentView === 'watchlist' ? '关注列表为空，点击表格中的 ☆ 添加项目'
+                   : currentView === 'search' ? '未找到匹配项目' : '无匹配项目';
+    return `<div class="empty-state"><p>${emptyMsg}</p></div>`;
+  }
 
-  const totalAnalysed = tableRows.filter(r => r.analyzed).length;
-  const filterNote = rowPairs.length < tableRows.length
+  const displayRows = getDisplayRows();
+  const totalAnalysed = displayRows.filter(r => r.analyzed).length;
+  const filterNote = rowPairs.length < displayRows.length
     ? ` &nbsp;·&nbsp; 筛选显示 ${rowPairs.length} 个` : '';
+  const viewLabel = currentView === 'watchlist' ? ' · ★ 关注列表' : currentView === 'search' ? ' · 搜索结果' : '';
 
   let html = `
-    <div class="table-summary">已分析 ${totalAnalysed} / ${tableRows.length} 个项目${filterNote}</div>
+    <div class="table-summary">已分析 ${totalAnalysed} / ${displayRows.length} 个项目${filterNote}${viewLabel}</div>
     <table class="trend-table">
       <thead>
         <tr>
           <th class="col-rank">#</th>
+          <th class="col-watch"></th>
           <th class="col-repo">项目</th>
           <th class="col-lang">语言</th>
           <th class="col-stars">&#9733; 今日新增</th>
@@ -283,10 +424,16 @@ function buildTableHtml(rowPairs) {
         ? row.biz.scenarios.slice(0, 2).join(' · ')
         : null;
     const descText = chineseDesc || row.description;
+    const rankDisplay = row.rank != null ? row.rank : '—';
+    const isWatched = row.project_id && watchlistSet.has(row.project_id);
+    const watchBtn = row.project_id
+      ? `<button class="watch-btn${isWatched ? ' watched' : ''}" data-pid="${row.project_id}" title="${isWatched ? '取消关注' : '添加关注'}">${isWatched ? '★' : '☆'}</button>`
+      : '';
 
     html += `
       <tr class="trend-row ${rowClass}" id="row-${idx}" data-lang="${lang}"${bdPitch ? ` data-rowidx="${idx}"` : ''}>
-        <td class="col-rank"><div class="cell"><span class="rank-num">${row.rank}</span></div></td>
+        <td class="col-rank"><div class="cell"><span class="rank-num">${rankDisplay}</span></div></td>
+        <td class="col-watch"><div class="cell">${watchBtn}</div></td>
         <td class="col-repo">
           <div class="cell" style="flex-direction:column;align-items:flex-start;gap:2px;">
             <div class="repo-name-row">
@@ -326,7 +473,12 @@ function buildTableHtml(rowPairs) {
 }
 
 function getFilteredRowPairs() {
-  const pairs = tableRows.map((row, idx) => ({row, idx}));
+  const display = getDisplayRows();
+  const pairs = display.map((row, i) => {
+    // find real index in tableRows so analysis cell IDs match
+    const idx = tableRows.indexOf(row);
+    return { row, idx: idx >= 0 ? idx : i };
+  });
   if (!currentLanguage) return pairs;
   return pairs.filter(({row}) => (row.primary_language || '') === currentLanguage);
 }
@@ -335,6 +487,14 @@ function renderTable() {
   const content = document.getElementById('content');
   if (!content) return;
   content.innerHTML = buildTableHtml(getFilteredRowPairs());
+  // Bind watch button clicks via event delegation on the table
+  content.addEventListener('click', e => {
+    const btn = e.target.closest('.watch-btn');
+    if (!btn) return;
+    const pid = btn.dataset.pid;
+    const idx = tableRows.findIndex(r => r.project_id === pid);
+    toggleWatchlist(pid, idx);
+  }, { once: true });
 }
 
 function renderAnalysisCell(rowIdx, state, errMsg) {
@@ -482,8 +642,10 @@ async function loadDashboard(date, since, forceRefetch = false) {
 
     // Snapshot items already include project_id + biz + score from the enriched API
     tableRows = mergeRows(snapshotItems);
+    currentView = 'trending';
 
     renderTable();
+    showFreshness(_snapshotCapturedAt);
     document.getElementById('footer-info').textContent =
       `${date} · ${since} · ${tableRows.length} 个项目`;
     autoAnalyzeAll();
@@ -570,7 +732,54 @@ function init() {
     const el = document.getElementById('version-badge');
     if (el) el.textContent = `v${data.version} · ${data.build}`;
     _serverHasKey = !!data.server_has_key;
+    _serverHasGithubToken = !!data.server_has_github_token;
   }).catch(() => {});
+
+  // Load initial watchlist
+  loadWatchlist();
+
+  // Watchlist tab button
+  const btnWatchlist = document.getElementById('btn-watchlist');
+  if (btnWatchlist) {
+    btnWatchlist.addEventListener('click', () => {
+      if (currentView === 'watchlist') {
+        currentView = 'trending';
+        btnWatchlist.classList.remove('active');
+        renderTable();
+      } else {
+        currentView = 'watchlist';
+        btnWatchlist.classList.add('active');
+        renderTable();
+      }
+    });
+  }
+
+  // Search box
+  const searchInput = document.getElementById('search-input');
+  const searchBtn = document.getElementById('btn-search');
+  const searchClear = document.getElementById('btn-search-clear');
+  if (searchInput) {
+    searchInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') doSearch(searchInput.value.trim());
+      if (e.key === 'Escape') {
+        searchInput.value = '';
+        if (currentView === 'search') { currentView = 'trending'; renderTable(); }
+        showFreshness(_snapshotCapturedAt);
+        document.getElementById('footer-info').textContent = `${currentDate} · ${currentSince} · ${tableRows.length} 个项目`;
+      }
+    });
+  }
+  if (searchBtn) searchBtn.addEventListener('click', () => doSearch(searchInput ? searchInput.value.trim() : ''));
+  if (searchClear) searchClear.addEventListener('click', () => {
+    if (searchInput) searchInput.value = '';
+    if (currentView === 'search') { currentView = 'trending'; tableRows = []; renderTable(); loadDashboard(currentDate, currentSince); }
+  });
+
+  // Export dropdown
+  const btnExportCsv = document.getElementById('btn-export-csv');
+  const btnExportJson = document.getElementById('btn-export-json');
+  if (btnExportCsv) btnExportCsv.addEventListener('click', () => doExport('csv'));
+  if (btnExportJson) btnExportJson.addEventListener('click', () => doExport('json'));
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────
@@ -593,13 +802,37 @@ function openSettingsModal(warnNoKey = false) {
   document.getElementById('settings-nokey-warn').style.display = warnNoKey ? 'block' : 'none';
   document.getElementById('settings-modal').style.display = 'flex';
   if (warnNoKey) document.getElementById('settings-api-key').focus();
+
+  // Load server key statuses
+  apiFetch(`${API}/settings/llm-key-status`).then(r => r.ok ? r.json() : null).then(data => {
+    const el = document.getElementById('settings-server-key-status');
+    if (!el || !data) return;
+    el.textContent = data.has_key
+      ? `✓ 服务器已配置 ${data.provider || ''} Key (${data.masked || '***'})  [${data.source}]`
+      : '服务器未配置 Key（使用本地 Key）';
+    el.style.color = data.has_key ? 'var(--success)' : 'var(--text-dim)';
+  }).catch(() => {});
+
+  apiFetch(`${API}/settings/github-token-status`).then(r => r.ok ? r.json() : null).then(data => {
+    const el = document.getElementById('settings-github-token-status');
+    if (!el || !data) return;
+    if (data.has_token) {
+      const rl = data.rate_limit;
+      const rateStr = rl && rl.remaining != null ? ` · API 剩余 ${rl.remaining}/${rl.limit}` : '';
+      el.textContent = `✓ Token 已配置 (${data.masked || '***'})${rateStr}`;
+      el.style.color = 'var(--success)';
+    } else {
+      el.textContent = '未配置（60 次/小时限额）';
+      el.style.color = 'var(--text-dim)';
+    }
+  }).catch(() => {});
 }
 
 function closeSettingsModal() {
   document.getElementById('settings-modal').style.display = 'none';
 }
 
-function saveSettingsModal() {
+async function saveSettingsModal() {
   const s = {
     ai_model:    document.getElementById('settings-model').value,
     ai_provider: document.getElementById('settings-provider').value,
@@ -607,10 +840,39 @@ function saveSettingsModal() {
     auto_fetch:  document.getElementById('settings-auto-fetch').checked,
   };
   saveSettings(s);
+
+  // Save server-side LLM key if the field is filled
+  const serverKeyInput = document.getElementById('settings-server-llm-key');
+  if (serverKeyInput && serverKeyInput.value.trim()) {
+    try {
+      await apiFetch(`${API}/settings/llm-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: serverKeyInput.value.trim(), provider: s.ai_provider }),
+      });
+      serverKeyInput.value = '';
+      _serverHasKey = true;
+    } catch (e) { /* ignore */ }
+  }
+
+  // Save GitHub Token if provided
+  const ghTokenInput = document.getElementById('settings-github-token');
+  if (ghTokenInput && ghTokenInput.value.trim()) {
+    try {
+      await apiFetch(`${API}/settings/github-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: ghTokenInput.value.trim() }),
+      });
+      ghTokenInput.value = '';
+      _serverHasGithubToken = true;
+    } catch (e) { /* ignore */ }
+  }
+
   closeSettingsModal();
 
   // Auto-retry analysis that triggered the "no key" warning
-  if (_pendingAnalysisRowIdx !== null && s.ai_api_key && (s.ai_model || 'rule-v1') === 'llm-v1') {
+  if (_pendingAnalysisRowIdx !== null && (s.ai_api_key || _serverHasKey) && (s.ai_model || 'rule-v1') === 'llm-v1') {
     const pendingIdx = _pendingAnalysisRowIdx;
     _pendingAnalysisRowIdx = null;
     const pendingRow = tableRows[pendingIdx];

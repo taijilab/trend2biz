@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Optional
 
 import httpx
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger("trend2biz")
+
+
+class TrendingParseError(Exception):
+    """Raised when the trending page cannot be parsed reliably."""
 
 
 @dataclass
@@ -33,9 +40,15 @@ def fetch_trending_html(since: str, language: str = "all", spoken: Optional[str]
     url = f"https://github.com/trending{lang_part}?since={since}"
     if spoken:
         url += f"&spoken_language_code={spoken}"
-    resp = httpx.get(url, timeout=20.0, headers={"User-Agent": "Trend2Biz/0.1"})
+    resp = httpx.get(url, timeout=20.0, headers={"User-Agent": "Mozilla/5.0 (compatible; Trend2Biz/0.9)"})
     resp.raise_for_status()
-    return resp.text
+    html = resp.text
+    # Detect login/CAPTCHA redirect early
+    if "<title>Sign in" in html or "Sign in to GitHub" in html:
+        snippet = html[:300]
+        logger.error("trending fetch: GitHub returned login page (blocked/rate-limited): %s", snippet)
+        raise TrendingParseError("GitHub returned login page — IP may be blocked or rate-limited")
+    return html
 
 
 def parse_trending_html(html: str) -> list[TrendingItemParsed]:
@@ -81,6 +94,15 @@ def parse_trending_html(html: str) -> list[TrendingItemParsed]:
                 forks_total_hint=forks_total,
                 stars_delta_window=delta,
             )
+        )
+
+    # Validate parse result — GitHub Trending always has 25 repos per page.
+    # Fewer than 5 likely means the page structure changed or returned an error page.
+    if len(items) < 5:
+        snippet = html[:500]
+        logger.error("trending parse: only %d items (expected ≥5); possible page change or block. snippet: %s", len(items), snippet)
+        raise TrendingParseError(
+            f"only {len(items)} repos parsed (expected ≥5) — GitHub page structure may have changed"
         )
 
     return items

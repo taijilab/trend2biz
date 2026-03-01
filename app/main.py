@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import csv
+import io
 import json
 import logging
 import os
@@ -15,10 +17,11 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from dateutil.parser import isoparse
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, desc, func, select, text
+from sqlalchemy import and_, desc, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -64,7 +67,7 @@ from app.schemas import (
 from app.services.biz import infer_biz_profile
 from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_readme, fetch_repo_metrics, fetch_star_history
 from app.services.scoring import compute_score
-from app.services.trending import fetch_trending_html, parse_trending_html
+from app.services.trending import TrendingParseError, fetch_trending_html, parse_trending_html
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +103,7 @@ logger = logging.getLogger("trend2biz")
 # Version / Build
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.9.0"
 
 def _git_short_hash() -> str:
     # Vercel 部署时无 .git 目录，优先读 Vercel 注入的 commit SHA
@@ -118,7 +121,77 @@ def _git_short_hash() -> str:
 
 APP_BUILD = _git_short_hash()
 
+# ---------------------------------------------------------------------------
+# Runtime key cache (survives restarts via .keys.json)
+# ---------------------------------------------------------------------------
+
+_KEYS_FILE = pathlib.Path(__file__).parent.parent / ".keys.json"
+
+def _load_keys() -> dict:
+    try:
+        if _KEYS_FILE.exists():
+            return json.loads(_KEYS_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_keys(data: dict) -> None:
+    try:
+        _KEYS_FILE.write_text(json.dumps(data))
+    except Exception as exc:
+        logger.warning("could not persist .keys.json: %s", exc)
+
+_runtime_keys: dict = _load_keys()
+
+
+def _effective_github_token() -> Optional[str]:
+    """Return GitHub token: runtime cache > env/config."""
+    return _runtime_keys.get("github_token") or settings.github_token
+
+
+def _effective_llm_key() -> Optional[str]:
+    """Return LLM API key: runtime cache > env/config."""
+    return _runtime_keys.get("llm_api_key") or settings.anthropic_api_key
+
+
+def _effective_llm_provider() -> Optional[str]:
+    return _runtime_keys.get("llm_provider") or "anthropic"
+
+
+# ---------------------------------------------------------------------------
+# Access-token middleware
+# ---------------------------------------------------------------------------
+
+class _AccessTokenMiddleware(BaseHTTPMiddleware):
+    """If ACCESS_TOKEN is configured, protect all /api/v1/* and /web/* paths."""
+
+    async def dispatch(self, request: Request, call_next):
+        required = settings.access_token
+        if not required:
+            return await call_next(request)
+        # Exempt health/ping endpoints and static assets that are not /web/
+        path = request.url.path
+        if path in ("/ping", "/health", "/"):
+            return await call_next(request)
+        # Check Authorization header or ?token= query param
+        auth_header = request.headers.get("Authorization", "")
+        token_param = request.query_params.get("token", "")
+        provided = ""
+        if auth_header.startswith("Bearer "):
+            provided = auth_header[7:]
+        elif token_param:
+            provided = token_param
+        if provided != required:
+            return Response(
+                content=json.dumps({"detail": "Unauthorized — access token required"}),
+                status_code=401,
+                media_type="application/json",
+            )
+        return await call_next(request)
+
+
 app = FastAPI(title=settings.app_name)
+app.add_middleware(_AccessTokenMiddleware)
 
 _STATIC_DIR = pathlib.Path(__file__).parent.parent / "static"
 if _STATIC_DIR.is_dir():
@@ -168,7 +241,77 @@ def version() -> dict:
     return {
         "version": APP_VERSION,
         "build": APP_BUILD,
-        "server_has_key": bool(settings.anthropic_api_key),
+        "server_has_key": bool(_effective_llm_key()),
+        "server_has_github_token": bool(_effective_github_token()),
+        "access_protected": bool(settings.access_token),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Settings API (runtime key management)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/v1/settings/github-token")
+def set_github_token(body: dict) -> dict:
+    """Store or clear the GitHub API token at runtime (persisted to .keys.json)."""
+    token = (body.get("token") or "").strip()
+    if token:
+        _runtime_keys["github_token"] = token
+    else:
+        _runtime_keys.pop("github_token", None)
+    _save_keys(_runtime_keys)
+    return {"saved": True, "has_token": bool(_effective_github_token())}
+
+
+@app.get("/api/v1/settings/github-token-status")
+def github_token_status() -> dict:
+    token = _effective_github_token()
+    masked = None
+    if token:
+        masked = token[:4] + "..." + token[-4:] if len(token) > 8 else "***"
+    # Optionally check rate limit
+    rate_info: dict = {}
+    if token:
+        try:
+            r = httpx.get(
+                "https://api.github.com/rate_limit",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+                timeout=8,
+            )
+            if r.status_code == 200:
+                core = r.json().get("resources", {}).get("core", {})
+                rate_info = {"remaining": core.get("remaining"), "limit": core.get("limit")}
+        except Exception:
+            pass
+    return {"has_token": bool(token), "masked": masked, "rate_limit": rate_info}
+
+
+@app.post("/api/v1/settings/llm-key")
+def set_llm_key(body: dict) -> dict:
+    """Store or clear the server-side LLM API key (persisted to .keys.json)."""
+    key = (body.get("api_key") or "").strip()
+    provider = (body.get("provider") or "anthropic").strip()
+    if key:
+        _runtime_keys["llm_api_key"] = key
+        _runtime_keys["llm_provider"] = provider
+    else:
+        _runtime_keys.pop("llm_api_key", None)
+        _runtime_keys.pop("llm_provider", None)
+    _save_keys(_runtime_keys)
+    return {"saved": True, "has_key": bool(_effective_llm_key()), "provider": _effective_llm_provider()}
+
+
+@app.get("/api/v1/settings/llm-key-status")
+def llm_key_status() -> dict:
+    key = _effective_llm_key()
+    masked = None
+    if key:
+        masked = key[:6] + "..." + key[-4:] if len(key) > 10 else "***"
+    return {
+        "has_key": bool(key),
+        "masked": masked,
+        "provider": _effective_llm_provider(),
+        "source": "runtime" if _runtime_keys.get("llm_api_key") else ("env" if settings.anthropic_api_key else "none"),
     }
 
 
@@ -223,7 +366,7 @@ def create_job(db: Session, job_type: str, payload: Optional[dict]) -> Job:
 
 
 def refresh_metrics_for_project(db: Session, project: Project, metric_date: date) -> RepoMetricDaily:
-    data = fetch_repo_metrics(project.repo_full_name, token=settings.github_token)
+    data = fetch_repo_metrics(project.repo_full_name, token=_effective_github_token())
     project.description = data.get("description") or project.description
     project.primary_language = data.get("primary_language") or project.primary_language
     project.license_spdx = data.get("license_spdx") or project.license_spdx
@@ -377,7 +520,7 @@ def enrich_description_zh(
     if description and any('\u4e00' <= c <= '\u9fff' for c in description):
         return description
 
-    effective_key = api_key or settings.anthropic_api_key
+    effective_key = api_key or _effective_llm_key()
     effective_provider = provider or "anthropic"
 
     if effective_key and (description or readme):
@@ -562,15 +705,19 @@ def generate_biz_and_score(
 ) -> tuple[BizProfile, ProjectScore]:
     biz_data: Optional[dict] = None
 
-    if model == "llm-v1" and api_key:
-        readme = fetch_readme(project.repo_full_name, token=settings.github_token)
+    # Use server-side LLM key as fallback when caller didn't supply one
+    effective_api_key = api_key or _effective_llm_key()
+    effective_provider = provider or _effective_llm_provider() or "anthropic"
+
+    if model == "llm-v1" and effective_api_key:
+        readme = fetch_readme(project.repo_full_name, token=_effective_github_token())
         biz_data = generate_biz_profile_llm(
             repo_name=project.repo_full_name,
             description=project.description,
             readme=readme,
             language=project.primary_language,
-            api_key=api_key,
-            provider=provider or "anthropic",
+            api_key=effective_api_key,
+            provider=effective_provider,
         )
         if not biz_data:
             logger.warning("llm-v1 failed for %s, falling back to rule-v1", project.repo_full_name)
@@ -578,8 +725,8 @@ def generate_biz_and_score(
 
     if biz_data is None:
         biz_data = infer_biz_profile(project.repo_full_name, project.description, project.primary_language)
-        readme = fetch_readme(project.repo_full_name, token=settings.github_token)
-        desc_zh = enrich_description_zh(project.repo_full_name, project.description, readme, api_key=api_key, provider=provider)
+        readme = fetch_readme(project.repo_full_name, token=_effective_github_token())
+        desc_zh = enrich_description_zh(project.repo_full_name, project.description, readme, api_key=effective_api_key, provider=effective_provider)
         if desc_zh:
             biz_data["explanations"]["description_zh"] = desc_zh
 
@@ -690,7 +837,7 @@ def _do_metrics_refresh(db: Session, project_id: str, metric_date: date) -> None
     ).scalar_one_or_none()
     if not has_old_record:
         try:
-            history = fetch_star_history(project.repo_full_name, token=settings.github_token)
+            history = fetch_star_history(project.repo_full_name, token=_effective_github_token())
             for date_str, stars in history:
                 hist_date = date.fromisoformat(date_str)
                 if hist_date == metric_date:
@@ -709,6 +856,32 @@ def _do_metrics_refresh(db: Session, project_id: str, metric_date: date) -> None
                     ))
         except Exception as exc:
             logger.warning("star history backfill failed for %s: %s", project.repo_full_name, exc)
+
+    # Cross-validate API stars vs scraped stars_total_hint from most recent snapshot
+    latest_m = db.execute(
+        select(RepoMetricDaily).where(RepoMetricDaily.project_id == project_id).order_by(desc(RepoMetricDaily.metric_date)).limit(1)
+    ).scalar_one_or_none()
+    if latest_m and latest_m.stars:
+        snapshot_item = db.execute(
+            select(TrendingSnapshotItem)
+            .join(TrendingSnapshot, TrendingSnapshotItem.snapshot_id == TrendingSnapshot.snapshot_id)
+            .where(
+                TrendingSnapshotItem.project_id == project_id,
+                TrendingSnapshotItem.stars_total_hint.isnot(None),
+            )
+            .order_by(desc(TrendingSnapshot.snapshot_date))
+            .limit(1)
+        ).scalar_one_or_none()
+        if snapshot_item and snapshot_item.stars_total_hint:
+            hint = snapshot_item.stars_total_hint
+            api_stars = latest_m.stars
+            if hint > 0:
+                deviation = abs(api_stars - hint) / hint
+                if deviation > 0.20:
+                    logger.warning(
+                        "stars accuracy warning for %s: scraped_hint=%d api=%d deviation=%.1f%%",
+                        project.repo_full_name, hint, api_stars, deviation * 100,
+                    )
 
 
 def _do_biz_generate(db: Session, project_id: str, model: str, api_key: Optional[str] = None, provider: Optional[str] = None) -> None:
@@ -1375,7 +1548,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
 
     if len(star_dates) <= 1:
         try:
-            history = fetch_star_history(project.repo_full_name, token=settings.github_token, max_samples=5)
+            history = fetch_star_history(project.repo_full_name, token=_effective_github_token(), max_samples=5)
             if len(history) > len(star_dates):
                 star_dates  = [h[0] for h in history]
                 star_values = [h[1] for h in history]
@@ -2023,6 +2196,142 @@ def get_report(report_id: str, db: Session = Depends(get_db)):
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
     return HTMLResponse(content=report.content)
+
+
+@app.get(f"{settings.api_prefix}/projects/search")
+def search_projects(
+    q: str = Query(..., min_length=1, max_length=100),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """Full-text search across repo name, description, Chinese description, category, monetization."""
+    like = f"%{q}%"
+    # First find matching projects
+    matched_projects = db.execute(
+        select(Project).where(
+            or_(
+                Project.repo_full_name.ilike(like),
+                Project.description.ilike(like),
+            )
+        ).order_by(desc(Project.last_seen_at)).limit(limit)
+    ).scalars().all()
+    pid_set = {p.project_id for p in matched_projects}
+
+    # Also search biz profiles (category, monetization_candidates, description_zh stored in explanations)
+    biz_matches = db.execute(
+        select(BizProfile).where(
+            or_(
+                BizProfile.category.ilike(like),
+            )
+        ).order_by(desc(BizProfile.created_at))
+    ).scalars().all()
+    extra_pids = [b.project_id for b in biz_matches if b.project_id not in pid_set]
+    if extra_pids:
+        extra_projects = db.execute(
+            select(Project).where(Project.project_id.in_(extra_pids[:limit]))
+        ).scalars().all()
+        matched_projects = list(matched_projects) + extra_projects
+
+    items = []
+    seen_pids: set = set()
+    for p in matched_projects[:limit]:
+        if p.project_id in seen_pids:
+            continue
+        seen_pids.add(p.project_id)
+        score = latest_score(db, p.project_id)
+        biz = latest_biz(db, p.project_id)
+        items.append(ProjectListItem(
+            project_id=p.project_id,
+            repo_full_name=p.repo_full_name,
+            primary_language=p.primary_language,
+            latest_score={"total": score.total_score, "grade": score.grade} if score else None,
+            latest_biz_profile={
+                "category": biz.category,
+                "scenarios": biz.scenarios,
+                "monetization_candidates": biz.monetization_candidates,
+                "description_zh": (biz.explanations or {}).get("description_zh"),
+                "bd_pitch": (biz.explanations or {}).get("bd_pitch"),
+            } if biz else None,
+        ))
+    return {"items": items, "total": len(items)}
+
+
+@app.get(f"{settings.api_prefix}/trending/snapshots/export")
+def export_snapshot(
+    since: str = Query(..., pattern="^(daily|weekly|monthly)$"),
+    date_param: Optional[date] = Query(default=None, alias="date"),
+    language: str = "all",
+    fmt: str = Query(default="csv", alias="format", pattern="^(csv|json)$"),
+    db: Session = Depends(get_db),
+):
+    """Export snapshot items with analysis results as CSV or JSON download."""
+    target_date = date_param or date.today()
+    snapshot = db.execute(
+        select(TrendingSnapshot).where(
+            and_(
+                TrendingSnapshot.snapshot_date == target_date,
+                TrendingSnapshot.since == since,
+                TrendingSnapshot.language == language,
+            )
+        )
+    ).scalar_one_or_none()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+
+    snap_items = db.execute(
+        select(TrendingSnapshotItem)
+        .where(TrendingSnapshotItem.snapshot_id == snapshot.snapshot_id)
+        .order_by(TrendingSnapshotItem.rank.asc())
+    ).scalars().all()
+
+    project_ids = [i.project_id for i in snap_items if i.project_id]
+    biz_by_pid: dict = {}
+    score_by_pid: dict = {}
+    for b in db.execute(select(BizProfile).where(BizProfile.project_id.in_(project_ids)).order_by(desc(BizProfile.created_at))).scalars().all():
+        if b.project_id not in biz_by_pid:
+            biz_by_pid[b.project_id] = b
+    for s in db.execute(select(ProjectScore).where(ProjectScore.project_id.in_(project_ids)).order_by(desc(ProjectScore.created_at))).scalars().all():
+        if s.project_id not in score_by_pid:
+            score_by_pid[s.project_id] = s
+
+    rows = []
+    for item in snap_items:
+        biz = biz_by_pid.get(item.project_id)
+        score = score_by_pid.get(item.project_id)
+        expl = (biz.explanations or {}) if biz else {}
+        rows.append({
+            "rank": item.rank,
+            "repo": item.repo_full_name,
+            "language": item.primary_language or "",
+            "stars_today": item.stars_delta_window or "",
+            "stars_total": item.stars_total_hint or "",
+            "grade": score.grade if score else "",
+            "score": score.total_score if score else "",
+            "category": biz.category if biz else "",
+            "monetization": ", ".join(biz.monetization_candidates or []) if biz else "",
+            "description_zh": expl.get("description_zh", ""),
+            "bd_pitch": expl.get("bd_pitch", ""),
+        })
+
+    filename = f"trend2biz-{target_date}-{since}.{fmt}"
+    if fmt == "json":
+        content = json.dumps(rows, ensure_ascii=False, indent=2)
+        return Response(
+            content=content,
+            media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    else:  # csv
+        buf = io.StringIO()
+        if rows:
+            writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        return Response(
+            content=buf.getvalue(),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
 
 
 @app.post(f"{settings.api_prefix}/watchlist", response_model=WatchlistItem)
