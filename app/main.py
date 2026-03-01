@@ -11,7 +11,7 @@ import sys
 import time
 
 import httpx
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from dateutil.parser import isoparse
@@ -146,6 +146,14 @@ def startup() -> None:
     except Exception as exc:
         logger.error("DB create_all failed: %s", exc)
     _migrate_add_missing_columns()
+    from app.scheduler import start_scheduler  # noqa: PLC0415
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    from app.scheduler import stop_scheduler  # noqa: PLC0415
+    stop_scheduler()
 
 
 @app.get("/ping")
@@ -671,11 +679,14 @@ def _do_metrics_refresh(db: Session, project_id: str, metric_date: date) -> None
     refresh_metrics_for_project(db, project, metric_date)
 
     # Backfill star history from GitHub Stargazers API (star-history.com technique).
-    # Only run if we have ≤ 2 existing records to avoid re-fetching on every refresh.
-    existing_count = db.execute(
-        select(func.count()).select_from(RepoMetricDaily).where(RepoMetricDaily.project_id == project_id)
-    ).scalar() or 0
-    if existing_count <= 2:
+    # Run when we lack records older than 7 days — indicates no full history yet.
+    week_ago = metric_date - timedelta(days=7)
+    has_old_record = db.execute(
+        select(RepoMetricDaily.metric_id).where(
+            and_(RepoMetricDaily.project_id == project_id, RepoMetricDaily.metric_date < week_ago)
+        ).limit(1)
+    ).scalar_one_or_none()
+    if not has_old_record:
         try:
             history = fetch_star_history(project.repo_full_name, token=settings.github_token)
             for date_str, stars in history:
@@ -683,9 +694,9 @@ def _do_metrics_refresh(db: Session, project_id: str, metric_date: date) -> None
                 if hist_date == metric_date:
                     continue  # today's record already created by refresh_metrics_for_project
                 exists = db.execute(
-                    select(RepoMetricDaily).where(
+                    select(RepoMetricDaily.metric_id).where(
                         and_(RepoMetricDaily.project_id == project_id, RepoMetricDaily.metric_date == hist_date)
-                    )
+                    ).limit(1)
                 ).scalar_one_or_none()
                 if not exists:
                     db.add(RepoMetricDaily(
@@ -841,6 +852,81 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
         error=job.error,
         payload=job.payload,
     )
+
+
+@app.get(f"{settings.api_prefix}/jobs")
+def list_jobs(
+    status: Optional[str] = Query(None, pattern="^(queued|running|succeeded|failed)$"),
+    job_type: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """List jobs with optional status/type filter, newest first."""
+    q = select(Job).order_by(desc(Job.created_at))
+    if status:
+        q = q.where(Job.status == status)
+    if job_type:
+        q = q.where(Job.job_type == job_type)
+    jobs = db.execute(q.limit(limit)).scalars().all()
+    return {
+        "jobs": [
+            {
+                "job_id": j.job_id,
+                "job_type": j.job_type,
+                "status": j.status,
+                "retry_count": j.retry_count,
+                "max_retries": j.max_retries,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+                "started_at": j.started_at.isoformat() if j.started_at else None,
+                "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+                "error": j.error,
+                "payload": j.payload,
+            }
+            for j in jobs
+        ]
+    }
+
+
+@app.post(f"{settings.api_prefix}/jobs/{{job_id}}:retry", response_model=JobResp, status_code=202)
+def retry_job(job_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Create a new copy of a failed job and re-queue it."""
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.status != "failed":
+        raise HTTPException(status_code=409, detail=f"job status is {job.status!r}; only failed jobs can be retried")
+
+    payload = job.payload or {}
+    new_job = create_job(db, job.job_type, payload)
+    db.commit()
+
+    jt = job.job_type
+    if jt == "trending_fetch":
+        snap_date = date.fromisoformat(payload["date"]) if "date" in payload else date.today()
+        background_tasks.add_task(run_snapshot_fetch_job, new_job.job_id,
+                                  payload.get("since", "daily"), payload.get("language", "all"),
+                                  payload.get("spoken"), snap_date)
+    elif jt == "metrics_refresh":
+        metric_date = date.fromisoformat(payload["date"]) if "date" in payload else date.today()
+        background_tasks.add_task(run_metrics_refresh_job, new_job.job_id,
+                                  payload.get("project_id"), metric_date)
+    elif jt == "biz_generate":
+        background_tasks.add_task(run_biz_generate_job, new_job.job_id,
+                                  payload.get("project_id"), payload.get("model", "rule-v1"))
+    elif jt == "score_batch":
+        background_tasks.add_task(run_score_batch_job, new_job.job_id,
+                                  payload.get("snapshot_id"), payload.get("biz_model", "rule-v1"))
+    else:
+        raise HTTPException(status_code=422, detail=f"cannot retry job_type {jt!r}")
+
+    return JobResp(job_id=new_job.job_id, status=new_job.status)
+
+
+@app.get(f"{settings.api_prefix}/scheduler/status")
+def scheduler_status():
+    """Return APScheduler state and next run times for each scheduled job."""
+    from app.scheduler import get_scheduler_status  # noqa: PLC0415
+    return get_scheduler_status()
 
 
 @app.get(f"{settings.api_prefix}/trending/snapshots/dates")
@@ -1258,16 +1344,13 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         )
 
     # Star history for chart
-    # Priority 1: GitHub Stargazers API (star-history.com technique) — rich history
-    # Priority 2: RepoMetricDaily — daily snapshots from past metric refreshes
-    # Priority 3: TrendingSnapshotItem.stars_total_hint — sparse but always available
     import json as _json
-    # Star history: read from DB (backfilled by metrics:refresh via fetch_star_history).
-    # Fallback to TrendingSnapshotItem if no metric rows exist.
+
     star_dates: list[str] = []
     star_values: list[int] = []
     star_source = ""
 
+    # Priority 1: RepoMetricDaily (backfilled by metrics:refresh via fetch_star_history)
     metrics_rows = db.execute(
         select(RepoMetricDaily)
         .where(RepoMetricDaily.project_id == project.project_id)
@@ -1278,6 +1361,21 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     if star_dates:
         star_source = "GitHub Stargazers API" if len(star_dates) > 2 else "每日指标快照"
 
+    # Priority 2: live GitHub Stargazers API with small sample (max 5 pages = 6 requests)
+    # Used when DB has no history (e.g., metrics:refresh not yet run or backfill failed).
+    if len(star_dates) <= 1:
+        try:
+            history = fetch_star_history(
+                project.repo_full_name, token=settings.github_token, max_samples=5
+            )
+            if len(history) > len(star_dates):
+                star_dates = [h[0] for h in history]
+                star_values = [h[1] for h in history]
+                star_source = "GitHub Stargazers API (预览)"
+        except Exception:
+            pass
+
+    # Priority 3: TrendingSnapshotItem.stars_total_hint
     if not star_dates:
         trending_rows = db.execute(
             select(TrendingSnapshotItem, TrendingSnapshot.snapshot_date)

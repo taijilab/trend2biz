@@ -15,6 +15,7 @@
     </div>
     <div class="header-right">
       <a href="/docs" target="_blank" class="api-link">API Docs</a>
+      <button id="btn-jobs" class="settings-icon-btn" title="后台任务" style="margin-right:4px">&#128197;</button>
       <button id="btn-settings" class="settings-icon-btn" title="设置">&#9881;</button>
     </div>
   </header>
@@ -118,6 +119,36 @@
       </div>
       <div class="settings-footer">
         <button id="settings-save-btn" class="settings-save-btn">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Jobs Panel Modal -->
+  <div id="jobs-modal" class="settings-modal" style="display:none">
+    <div class="settings-box jobs-box">
+      <div class="settings-header">
+        <span class="settings-title">&#128197; 后台任务</span>
+        <button class="settings-close-btn" id="jobs-close-btn" aria-label="关闭">&#10005;</button>
+      </div>
+      <div class="settings-body">
+        <!-- Today summary -->
+        <section class="settings-section">
+          <h4 class="settings-section-title">今日任务汇总</h4>
+          <div id="jobs-summary" class="jobs-summary">加载中…</div>
+        </section>
+        <!-- Scheduler next runs -->
+        <section class="settings-section" id="jobs-sched-section" style="display:none">
+          <h4 class="settings-section-title">定时计划 (UTC)</h4>
+          <div id="jobs-schedule" class="jobs-schedule"></div>
+        </section>
+        <!-- Failed jobs -->
+        <section class="settings-section">
+          <h4 class="settings-section-title">失败任务 <span id="jobs-fail-count" class="jobs-fail-badge"></span></h4>
+          <div id="jobs-fail-list" class="jobs-fail-list">—</div>
+        </section>
+      </div>
+      <div class="settings-footer">
+        <button id="jobs-refresh-btn" class="settings-save-btn">&#8635; 刷新</button>
       </div>
     </div>
   </div>
