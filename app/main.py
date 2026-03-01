@@ -1337,66 +1337,52 @@ def batch_score(payload: BatchScoreIn, background_tasks: BackgroundTasks, db: Se
 
 @app.post(f"{settings.api_prefix}/reports:generate", response_model=ReportOut)
 def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
+    import json as _json
+    from collections import defaultdict
+
     project = db.get(Project, payload.project_id)
     if not project:
         raise HTTPException(status_code=404, detail="project not found")
 
     score = latest_score(db, project.project_id)
-    biz = latest_biz(db, project.project_id)
-    expl = (biz.explanations or {}) if biz else {}
-    desc_zh = expl.get("description_zh") if biz else None
-    bd_pitch = expl.get("bd_pitch") if biz else None
+    biz   = latest_biz(db, project.project_id)
+    expl  = (biz.explanations or {}) if biz else {}
 
-    # Fallback Chinese description from biz profile when LLM didn't run
-    if not desc_zh and biz:
-        _cat_cn = {
-            "agent": "AI 智能体框架", "developer-tools": "开发者工具",
-            "security": "安全工具", "data": "数据处理工具",
-            "observability": "可观测性平台", "fintech": "金融科技工具",
-            "edu-tech": "教育科技产品", "biotech": "生命科学工具",
-            "infra": "基础设施", "ecommerce": "电商工具",
-        }.get(biz.category or "", biz.category or "开源项目")
-        _sc = "、".join((biz.scenarios or [])[:2]) or "多种应用场景"
-        _mn = "、".join((biz.monetization_candidates or [])[:2]) or "商业授权"
-        desc_zh = (
-            f"这是一款{_cat_cn}，面向 {biz.buyer or '技术团队'}，主要应用于{_sc}。"
-            f"潜在变现路径包括{_mn}。"
-            f"（以上为规则推断，使用 AI 模型分析后可获得更精准的中文解读）"
-        )
-
-    # Star history for chart
-    import json as _json
-
-    star_dates: list[str] = []
-    star_values: list[int] = []
-    star_source = ""
-
-    # Priority 1: RepoMetricDaily (backfilled by metrics:refresh via fetch_star_history)
+    # ── metrics ──────────────────────────────────────────────────────────────
     metrics_rows = db.execute(
         select(RepoMetricDaily)
         .where(RepoMetricDaily.project_id == project.project_id)
         .order_by(RepoMetricDaily.metric_date.asc())
     ).scalars().all()
-    star_dates = [str(r.metric_date) for r in metrics_rows if r.stars is not None]
-    star_values = [r.stars for r in metrics_rows if r.stars is not None]
-    if star_dates:
-        star_source = "GitHub Stargazers API" if len(star_dates) > 2 else "每日指标快照"
 
-    # Priority 2: live GitHub Stargazers API with small sample (max 5 pages = 6 requests)
-    # Used when DB has no history (e.g., metrics:refresh not yet run or backfill failed).
+    latest_m = metrics_rows[-1] if metrics_rows else None
+    cur_stars   = latest_m.stars            if latest_m else None
+    cur_forks   = latest_m.forks            if latest_m else None
+    cur_issues  = latest_m.open_issues      if latest_m else None
+    cur_commits = latest_m.commits_30d      if latest_m else None
+    cur_contribs= latest_m.contributors_90d if latest_m else None
+    bus_factor  = latest_m.bus_factor_top1_share if latest_m else None
+
+    # ── star history ─────────────────────────────────────────────────────────
+    star_dates: list[str] = []
+    star_values: list[int] = []
+    star_source = ""
+
+    star_dates  = [str(r.metric_date) for r in metrics_rows if r.stars is not None]
+    star_values = [r.stars            for r in metrics_rows if r.stars is not None]
+    if star_dates:
+        star_source = "GitHub Stargazers API"
+
     if len(star_dates) <= 1:
         try:
-            history = fetch_star_history(
-                project.repo_full_name, token=settings.github_token, max_samples=5
-            )
+            history = fetch_star_history(project.repo_full_name, token=settings.github_token, max_samples=5)
             if len(history) > len(star_dates):
-                star_dates = [h[0] for h in history]
+                star_dates  = [h[0] for h in history]
                 star_values = [h[1] for h in history]
                 star_source = "GitHub Stargazers API (预览)"
         except Exception:
             pass
 
-    # Priority 3: TrendingSnapshotItem.stars_total_hint
     if not star_dates:
         trending_rows = db.execute(
             select(TrendingSnapshotItem, TrendingSnapshot.snapshot_date)
@@ -1405,235 +1391,404 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             .where(TrendingSnapshotItem.stars_total_hint.isnot(None))
             .order_by(TrendingSnapshot.snapshot_date.asc())
         ).all()
-        star_dates = [str(row[1]) for row in trending_rows]
+        star_dates  = [str(row[1]) for row in trending_rows]
         star_values = [row[0].stars_total_hint for row in trending_rows]
         if star_dates:
             star_source = "Trending 快照"
 
-    grade = score.grade if score else "N/A"
-    total_score = score.total_score if score else None
+    # ── monthly growth table ──────────────────────────────────────────────────
+    def monthly_growth(dates, values):
+        monthly: dict[str, int] = {}
+        for d, v in zip(dates, values):
+            monthly[d[:7]] = v
+        rows = []
+        keys = sorted(monthly)
+        for i, m in enumerate(keys):
+            v   = monthly[m]
+            pv  = monthly[keys[i - 1]] if i > 0 else v
+            delta = v - pv
+            mom   = (delta / pv * 100) if pv > 0 else 0.0
+            rows.append({"month": m, "stars": v, "delta": delta, "mom": mom})
+        return rows[-12:]
+
+    growth_rows = monthly_growth(star_dates, star_values)
+
+    # ── score helpers ─────────────────────────────────────────────────────────
+    def s2g(v):
+        if v is None: return "N/A"
+        if v >= 8.5:  return "S"
+        if v >= 7.0:  return "A"
+        if v >= 5.5:  return "B"
+        if v >= 4.0:  return "C"
+        return "D"
+
+    def grade_color(g):
+        return {"S": "#f59e0b", "A": "#22c55e", "B": "#3b82f6", "C": "#6b7280", "D": "#ef4444"}.get(g, "#94a3b8")
+
+    def grade_badge(g):
+        c = grade_color(g)
+        tc = "#000" if g in ("S", "A") else "#fff"
+        return f'<span style="display:inline-block;padding:3px 12px;border-radius:16px;font-weight:700;font-size:13px;background:{c};color:{tc}">{g}</span>'
+
+    def fmt_num(v):
+        if v is None: return "—"
+        return f"{v/1000:.1f}k" if v >= 1000 else str(v)
+
+    def pct(v):
+        if v is None: return "—"
+        return f"{v:.0%}"
+
+    # ── YC dimensions ────────────────────────────────────────────────────────
+    yc_dims = [
+        ("Traction & Growth",    "牵引力与增长",  0.30, score.traction_score    if score else None),
+        ("Problem & Market",     "问题与市场",    0.20, score.market_score       if score else None),
+        ("Product & Technology", "产品与技术",    0.20, score.moat_score         if score else None),
+        ("Business Model",       "商业模式",      0.15, score.monetization_score if score else None),
+        ("Team & Community",     "团队与社区",    0.05, score.team_score         if score else None),
+        ("Risk (inverted)",      "风险(反转)",    0.10, (10 - score.risk_score)  if score and score.risk_score else None),
+    ]
+    yc_score_100 = None
+    if score:
+        parts = [(w * v) for _, _, w, v in yc_dims if v is not None]
+        ws    = sum(w for _, _, w, v in yc_dims if v is not None)
+        yc_score_100 = round(sum(parts) / ws * 10, 1) if ws > 0 else None
+
+    # ── recommendation ────────────────────────────────────────────────────────
+    if yc_score_100 is None:
+        rec = "数据不足，暂无建议"
+        rec_color = "#64748b"
+    elif yc_score_100 >= 80:
+        rec = "强烈推荐跟进 🚀"
+        rec_color = "#22c55e"
+    elif yc_score_100 >= 65:
+        rec = "值得持续观察 👀"
+        rec_color = "#3b82f6"
+    elif yc_score_100 >= 50:
+        rec = "暂不推荐，等待更多信号 ⏳"
+        rec_color = "#f59e0b"
+    else:
+        rec = "不推荐，商业潜力有限 ❌"
+        rec_color = "#ef4444"
+
     generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    signals      = (score.explanations or {}).get("signals_text", {}) if score else {}
 
-    highlights_html = "".join(f"<li>{h}</li>" for h in (score.highlights or [])) if score else ""
-    risks_html = "".join(f"<li>{r}</li>" for r in (score.risks or [])) if score else ""
-    followups_html = "".join(f"<li>{f}</li>" for f in (score.followups or [])) if score else ""
-
-    # Score breakdown cells with signal text
-    score_dim_labels = {"market": "市场", "traction": "牵引力", "moat": "护城河", "team": "团队", "monetization": "商业化", "risk": "风险"}
-    score_values = {
-        "market": score.market_score, "traction": score.traction_score,
-        "moat": score.moat_score, "team": score.team_score,
-        "monetization": score.monetization_score, "risk": score.risk_score,
-    } if score else {}
-    signals_text = (score.explanations or {}).get("signals_text", {}) if score else {}
-    score_cells_html = "".join(
-        f'<div class="score-item"><div class="val">{v:.1f}</div>'
-        f'<div class="lbl">{score_dim_labels.get(k, k)}</div>'
-        f'<div class="sig">{signals_text.get(k, "")}</div></div>'
-        for k, v in score_values.items()
-        if v is not None
+    # ── section: 项目概况 ─────────────────────────────────────────────────────
+    first_date = star_dates[0][:7] if star_dates else "—"
+    overview_rows = [
+        ("仓库", f'<a href="{project.repo_url}" style="color:#0f3460">{project.repo_full_name}</a>'),
+        ("主语言", project.primary_language or "—"),
+        ("首次上榜", first_date),
+        ("当前 Stars", fmt_num(cur_stars)),
+        ("Forks", fmt_num(cur_forks)),
+        ("Open Issues", fmt_num(cur_issues)),
+        ("贡献者 (90d)", fmt_num(cur_contribs)),
+        ("Commits (30d)", fmt_num(cur_commits)),
+        ("主维护者集中度", f"{bus_factor:.0%}" if bus_factor else "—"),
+        ("商业赛道", biz.category if biz else "—"),
+        ("变现形式", "、".join(biz.monetization_candidates or []) if biz else "—"),
+        ("销售动力", biz.sales_motion if biz else "—"),
+        ("License", expl.get("license") or "—"),
+    ]
+    overview_html = "".join(
+        f'<tr><td style="color:#64748b;width:130px;padding:6px 8px;vertical-align:top;font-size:13px">{k}</td>'
+        f'<td style="padding:6px 8px;font-size:13px;font-weight:500">{v}</td></tr>'
+        for k, v in overview_rows
     )
 
-    biz_tags_html = ""
-    if biz:
-        for item in (biz.monetization_candidates or [])[:3]:
-            biz_tags_html += f'<span class="tag">{item}</span>'
-        for item in (biz.delivery_forms or [])[:3]:
-            biz_tags_html += f'<span class="tag" style="background:#dcfce7;color:#166534">{item}</span>'
+    # ── section: Star 增长数据表 ──────────────────────────────────────────────
+    growth_table_html = ""
+    if growth_rows:
+        rows_html = ""
+        for r in growth_rows:
+            delta_str = f'+{fmt_num(r["delta"])}' if r["delta"] >= 0 else fmt_num(r["delta"])
+            mom_str   = f'+{r["mom"]:.1f}%' if r["mom"] >= 0 else f'{r["mom"]:.1f}%'
+            mom_color = "#22c55e" if r["mom"] > 10 else ("#f59e0b" if r["mom"] > 0 else "#64748b")
+            rows_html += (
+                f'<tr><td>{r["month"]}</td><td>{fmt_num(r["stars"])}</td>'
+                f'<td>{delta_str}</td>'
+                f'<td style="color:{mom_color};font-weight:600">{mom_str}</td></tr>'
+            )
+        growth_table_html = f"""
+        <div style="margin-top:14px;overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse;font-size:12px">
+            <thead><tr style="background:#f8fafc;color:#64748b">
+              <th style="padding:6px 8px;text-align:left">月份</th>
+              <th style="padding:6px 8px;text-align:left">Stars</th>
+              <th style="padding:6px 8px;text-align:left">月增量</th>
+              <th style="padding:6px 8px;text-align:left">MoM%</th>
+            </tr></thead>
+            <tbody>{rows_html}</tbody>
+          </table>
+        </div>"""
 
-    en_desc = project.description or ""
-    en_block = (
-        f'<p style="font-size:13px;color:#64748b;margin:0 0 10px;font-style:italic">'
-        f'🌐 {en_desc}</p>'
-    ) if en_desc else ""
-    zh_block = f'<div class="desc">{desc_zh}</div>' if desc_zh else ""
-    desc_section = (
-        f'<div class="card"><h2>项目介绍</h2>{en_block}{zh_block}</div>'
-    ) if (en_desc or desc_zh) else ""
+    # ── section: Chart.js ────────────────────────────────────────────────────
+    star_source_note = f' <span style="font-size:10px;font-weight:400;color:#94a3b8">· {star_source}</span>' if star_source else ""
+    star_chart_section = ""
+    chart_script = ""
+    if star_dates:
+        star_chart_section = (
+            f'<div class="card"><h2>📈 Star 增长趋势{star_source_note}</h2>'
+            f'<canvas id="starChart" style="max-height:220px"></canvas>'
+            f'{growth_table_html}</div>'
+        )
+        _labels = _json.dumps(star_dates)
+        _data   = _json.dumps(star_values)
+        chart_script = (
+            '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>\n'
+            '<script>(function(){'
+            'var el=document.getElementById("starChart");if(!el)return;'
+            'new Chart(el,{type:"line",data:{labels:' + _labels + ','
+            'datasets:[{label:"Stars",data:' + _data + ','
+            'borderColor:"#0f3460",backgroundColor:"rgba(15,52,96,0.08)",'
+            'borderWidth:2,pointRadius:3,tension:0.3,fill:true}]},'
+            'options:{responsive:true,plugins:{legend:{display:false},'
+            'tooltip:{callbacks:{label:function(c){var v=c.parsed.y;'
+            'return"\\u2b50 "+(v>=1000?(v/1000).toFixed(1)+"k":v);}}}}}'
+            ',scales:{x:{ticks:{maxTicksLimit:8,font:{size:10}}},'
+            'y:{ticks:{font:{size:10},callback:function(v){return v>=1000?(v/1000).toFixed(0)+"k":v;}}}}'
+            '}});})();</script>'
+        )
 
-    bd_section = (
-        f'<div class="card"><h2>BD 话术</h2><div class="bd-pitch">{bd_pitch}</div></div>'
-    ) if bd_pitch else ""
+    # ── section: traction ─────────────────────────────────────────────────────
+    fork_rate = f"{cur_forks/cur_stars:.1%}" if cur_stars and cur_forks and cur_stars > 0 else "—"
+    star_mom  = f'+{growth_rows[-1]["mom"]:.1f}%' if growth_rows else "—"
+    traction_grade = s2g(score.traction_score if score else None)
+    traction_bullets = [
+        f"Star 月增长率：{star_mom}",
+        f"Fork/Star 比：{fork_rate}（高说明开发者真正在用）",
+        f"近 90 天活跃贡献者：{fmt_num(cur_contribs)}",
+        f"近 30 天 Commits：{fmt_num(cur_commits)}",
+        f"主维护者集中度：{'高（单点风险）' if bus_factor and bus_factor > 0.5 else '较分散（健康）' if bus_factor else '—'}",
+    ] + (score.highlights or [])[:3]
 
-    # Sales motion & confidence notes
-    _motion_desc = {
-        "PLG": "Product-Led Growth — users discover, try, and pay through the product itself, with no heavy sales involvement. Best for developer tools, infrastructure, and AI frameworks.",
-        "Enterprise": "Enterprise Sales — a dedicated sales team closes contracts with large organizations. Best for security, compliance, and life sciences requiring deep customization.",
-    }.get(biz.sales_motion if biz else "", "")
+    # ── section: problem & market ────────────────────────────────────────────
+    market_grade = s2g(score.market_score if score else None)
+    scenarios_str = "、".join(biz.scenarios or []) if biz else "—"
+    market_base   = getattr(biz, "market_base", None) if biz else None
+    market_bullets = [
+        f"目标用户：{biz.buyer if biz else '—'}",
+        f"核心应用场景：{scenarios_str}",
+        f"市场基础评分：{market_base:.1f}/10" if market_base else "市场规模：待评估",
+        f"项目描述：{(project.description or '—')[:120]}",
+    ] + [signals.get("market", "")]
+
+    # ── section: product & technology ────────────────────────────────────────
+    moat_grade = s2g(score.moat_score if score else None)
+    delivery   = "、".join(biz.delivery_forms or []) if biz else "—"
+    moat_bullets = [
+        f"主要编程语言：{project.primary_language or '—'}",
+        f"交付形态：{delivery}",
+        f"护城河信号：{signals.get('moat', '—')}",
+        f"置信度：{pct(biz.confidence) if biz else '—'}（基于 {'AI 分析' if biz and biz.model_name != 'rule-v1' else '规则匹配'}）",
+    ]
+
+    # ── section: business model ───────────────────────────────────────────────
+    biz_grade  = s2g(score.monetization_score if score else None)
+    mono_items = biz.monetization_candidates or [] if biz else []
+    form_items = biz.delivery_forms          or [] if biz else []
     _motion_desc_zh = {
-        "PLG": "产品驱动增长 — 用户自助发现、体验并付费，无需大量销售介入",
+        "PLG": "产品驱动增长 — 用户自助发现、体验并付费",
         "Enterprise": "企业直销 — 依靠专职销售团队拓展企业合同",
-    }.get(biz.sales_motion if biz else "", "")
+    }.get(biz.sales_motion if biz else "", biz.sales_motion if biz else "—")
 
-    _buyer_val = biz.buyer if biz else "N/A"
-    _motion_val = biz.sales_motion if biz else "N/A"
-    _conf_val = f"{biz.confidence:.0%}" if biz and biz.confidence else "N/A"
+    biz_table_rows = ""
+    for item in mono_items[:5]:
+        feasibility = "⭐⭐⭐" if item in ["SaaS", "Cloud", "API", "Enterprise"] else "⭐⭐"
+        biz_table_rows += f'<tr><td>{item}</td><td>{feasibility}</td><td>适合 {biz.buyer or "技术团队"}</td></tr>'
+    if not biz_table_rows:
+        biz_table_rows = '<tr><td colspan="3" style="color:#94a3b8">暂无分析数据，建议运行 AI 分析</td></tr>'
 
-    biz_meta_html = f"""
-    <div style="display:grid;gap:10px;margin-top:4px">
-      <div style="display:grid;grid-template-columns:120px 1fr;gap:6px;align-items:start;border-bottom:1px solid #f1f5f9;padding-bottom:8px">
-        <div>
-          <div style="font-size:13px;font-weight:600;color:#1e293b">买方</div>
-          <div style="font-size:10px;color:#94a3b8;letter-spacing:.03em">Buyer</div>
-        </div>
-        <div>
-          <div style="font-size:14px;color:#0f3460;font-weight:600">{_buyer_val}</div>
-          <div style="font-size:11px;color:#64748b;margin-top:2px;line-height:1.5">The target buyer persona — who would sign the contract or make the purchase decision.</div>
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:120px 1fr;gap:6px;align-items:start;border-bottom:1px solid #f1f5f9;padding-bottom:8px">
-        <div>
-          <div style="font-size:13px;font-weight:600;color:#1e293b">动力</div>
-          <div style="font-size:10px;color:#94a3b8;letter-spacing:.03em">Motion</div>
-        </div>
-        <div>
-          <div style="font-size:14px;color:#0f3460;font-weight:600">{_motion_val} <span style="font-size:11px;color:#64748b;font-weight:400">· {_motion_desc_zh}</span></div>
-          <div style="font-size:11px;color:#64748b;margin-top:2px;line-height:1.5">{_motion_desc}</div>
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:120px 1fr;gap:6px;align-items:start">
-        <div>
-          <div style="font-size:13px;font-weight:600;color:#1e293b">置信度</div>
-          <div style="font-size:10px;color:#94a3b8;letter-spacing:.03em">Confidence</div>
-        </div>
-        <div>
-          <div style="font-size:14px;color:#0f3460;font-weight:600">{_conf_val}</div>
-          <div style="font-size:11px;color:#64748b;margin-top:2px;line-height:1.5">How confident the system is in this business profile inference. 65% = rule-based keyword match on repo name &amp; description. Re-run with AI model for higher accuracy.</div>
-        </div>
-      </div>
-    </div>""" if biz else ""
+    # ── section: team & community ────────────────────────────────────────────
+    team_grade  = s2g(score.team_score if score else None)
+    bd_pitch    = expl.get("bd_pitch") or ""
+    team_bullets = [
+        f"近 90 天贡献者数：{fmt_num(cur_contribs)}",
+        f"主维护者集中度：{pct(bus_factor)}（>50% 表示单点风险）" if bus_factor else "主维护者集中度：数据待采集",
+        f"团队信号：{signals.get('team', '—')}",
+        f"销售动力评估：{_motion_desc_zh}",
+    ]
 
-    # Star history chart section
-    star_source_note = (
-        f'<span style="font-size:10px;font-weight:400;color:#94a3b8;'
-        f'text-transform:none;letter-spacing:0"> · {star_source}</span>'
-    ) if star_source else ""
-    star_chart_section = (
-        f'<div class="card"><h2>Star 增长历史{star_source_note}</h2>'
-        f'<canvas id="starChart" style="max-height:220px"></canvas></div>'
-    ) if star_dates else ""
-    chart_script = (
-        f'<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>\n'
-        f'<script>\n'
-        f'(function(){{\n'
-        f'  var el = document.getElementById("starChart");\n'
-        f'  if (!el) return;\n'
-        f'  new Chart(el, {{\n'
-        f'    type: "line",\n'
-        f'    data: {{\n'
-        f'      labels: {_json.dumps(star_dates)},\n'
-        f'      datasets: [{{\n'
-        f'        label: "Stars",\n'
-        f'        data: {_json.dumps(star_values)},\n'
-        f'        borderColor: "#0f3460",\n'
-        f'        backgroundColor: "rgba(15,52,96,0.08)",\n'
-        f'        borderWidth: 2,\n'
-        f'        pointRadius: 3,\n'
-        f'        pointHoverRadius: 5,\n'
-        f'        tension: 0.3,\n'
-        f'        fill: true\n'
-        f'      }}]\n'
-        f'    }},\n'
-        f'    options: {{\n'
-        f'      responsive: true,\n'
-        f'      interaction: {{ mode: "index", intersect: false }},\n'
-        f'      plugins: {{\n'
-        f'        legend: {{ display: false }},\n'
-        f'        tooltip: {{\n'
-        f'          callbacks: {{\n'
-        f'            label: function(ctx) {{\n'
-        f'              var v = ctx.parsed.y;\n'
-        f'              return "⭐ " + (v >= 1000 ? (v/1000).toFixed(1)+"k" : v);\n'
-        f'            }}\n'
-        f'          }}\n'
-        f'        }}\n'
-        f'      }},\n'
-        f'      scales: {{\n'
-        f'        x: {{ ticks: {{ maxTicksLimit: 8, font: {{ size: 10 }} }} }},\n'
-        f'        y: {{\n'
-        f'          ticks: {{\n'
-        f'            font: {{ size: 10 }},\n'
-        f'            callback: function(v) {{ return v >= 1000 ? (v/1000).toFixed(0)+"k" : v; }}\n'
-        f'          }}\n'
-        f'        }}\n'
-        f'      }}\n'
-        f'    }}\n'
-        f'  }});\n'
-        f'}})();\n'
-        f'</script>'
-    ) if star_dates else ""
+    # ── section: risk ────────────────────────────────────────────────────────
+    raw_risks = (score.risks or []) if score else []
+    risk_score_inv = (10 - score.risk_score) if score and score.risk_score else None
 
+    _risk_cat = [
+        ("大厂竞争风险",   "medium", "大型云厂商或开源基金会可能推出竞品"),
+        ("License 风险",  "low",    f"当前 License：{expl.get('license', '待确认')}"),
+        ("维护者单点风险", "high" if bus_factor and bus_factor > 0.5 else "low",
+         f"主维护者集中度 {pct(bus_factor)}，{'需引入更多 Contributor' if bus_factor and bus_factor > 0.5 else '贡献分布健康'}"),
+        ("商业化转化风险", "medium", "从 OSS 用户转为付费用户需要明确的企业版价值主张"),
+        ("技术过时风险",   "low",    f"主语言 {project.primary_language or '未知'}，{signals.get('moat', '技术细节待评估')}"),
+    ]
+    risk_level_color = {"high": "#ef4444", "medium": "#f59e0b", "low": "#22c55e"}
+    risk_level_label = {"high": "高", "medium": "中", "low": "低"}
+    risk_rows_html = ""
+    for cat, lvl, desc in _risk_cat:
+        c = risk_level_color.get(lvl, "#94a3b8")
+        l = risk_level_label.get(lvl, lvl)
+        risk_rows_html += (
+            f'<tr><td style="font-weight:500">{cat}</td>'
+            f'<td><span style="color:{c};font-weight:700">{l}</span></td>'
+            f'<td style="color:#64748b;font-size:12px">{desc}</td></tr>'
+        )
+    for r in raw_risks[:3]:
+        risk_rows_html += f'<tr><td colspan="3" style="color:#64748b;font-size:12px;padding-left:8px">· {r}</td></tr>'
+
+    # ── section: YC 综合评分表 ────────────────────────────────────────────────
+    yc_score_rows = ""
+    for en, zh, w, v in yc_dims:
+        g = s2g(v)
+        c = grade_color(g)
+        score_100 = round(v * 10, 0) if v is not None else None
+        yc_score_rows += (
+            f'<tr><td style="font-weight:500">{zh} <span style="color:#94a3b8;font-size:11px">{en}</span></td>'
+            f'<td style="color:#64748b">{w:.0%}</td>'
+            f'<td>{grade_badge(g) if g != "N/A" else "—"}</td>'
+            f'<td style="font-weight:700;color:#0f3460">{int(score_100) if score_100 else "—"} / 100</td></tr>'
+        )
+    yc_total_row = (
+        f'<tr style="background:#f0f9ff;font-weight:700">'
+        f'<td>综合得分</td><td>100%</td><td>{grade_badge(score.grade) if score else "—"}</td>'
+        f'<td style="font-size:18px;color:#0f3460">{yc_score_100 if yc_score_100 else "—"} / 100</td></tr>'
+    )
+
+    # ── section: 投资建议 ────────────────────────────────────────────────────
+    followups = (score.followups or []) if score else []
+    checklist_html = ""
+    default_actions = [
+        "联系维护团队了解商业化计划",
+        "调研企业用户付费意愿",
+        "监控 Star 增速是否持续",
+        "评估 License 变更风险",
+        "关注大厂竞品动态",
+    ]
+    for item in (followups or default_actions)[:6]:
+        checklist_html += f'<li style="margin-bottom:6px">{item}</li>'
+
+    timing = (
+        "现在是介入好时机（增速强劲）" if yc_score_100 and yc_score_100 >= 75 else
+        "等待商业化路径明确后介入" if yc_score_100 and yc_score_100 >= 55 else
+        "暂时观察，等待更多市场验证"
+    )
+    bd_section_html = f'<div style="margin-top:10px;background:#fefce8;border-left:3px solid #f59e0b;padding:10px 14px;border-radius:6px;font-size:13px;line-height:1.7">{bd_pitch}</div>' if bd_pitch else ""
+
+    # ── HTML card helper ──────────────────────────────────────────────────────
+    def yc_card(title_en, title_zh, grade_val, bullets):
+        g = s2g(grade_val)
+        bullet_html = "".join(f'<li style="margin-bottom:6px;color:#374151">{b}</li>' for b in bullets if b and b != "—")
+        return f"""
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+            <h2 style="margin:0;flex:1">{title_zh} <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">{title_en}</span></h2>
+            {grade_badge(g) if g != "N/A" else ""}
+          </div>
+          <ul style="margin:0;padding-left:18px">{bullet_html}</ul>
+        </div>"""
+
+    # ── assemble HTML ─────────────────────────────────────────────────────────
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>{project.repo_full_name} — Trend2Biz 商业分析报告</title>
+  <title>{project.repo_full_name} — YC 投资分析报告</title>
   <style>
-    body{{font-family:system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#1a1a2e;background:#f8fafc}}
+    body{{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;color:#1a1a2e;background:#f8fafc}}
     .header{{background:linear-gradient(135deg,#0f3460 0%,#16213e 100%);color:#fff;padding:28px 32px;border-radius:12px;margin-bottom:20px}}
     .header h1{{margin:0 0 6px;font-size:22px;font-weight:700}}
     .header .meta{{font-size:13px;opacity:.8}}
     .card{{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:20px 24px;margin-bottom:16px}}
     .card h2{{font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin:0 0 12px}}
-    .grade-badge{{display:inline-block;padding:4px 14px;border-radius:20px;font-weight:700;font-size:14px}}
-    .grade-S{{background:#f59e0b;color:#000}}.grade-A{{background:#22c55e;color:#000}}
-    .grade-B{{background:#3b82f6;color:#fff}}.grade-C{{background:#6b7280;color:#fff}}
-    .score-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}}
-    .score-item{{text-align:center;padding:10px;background:#f8fafc;border-radius:8px}}
-    .score-item .val{{font-size:22px;font-weight:700;color:#0f3460}}
-    .score-item .lbl{{font-size:11px;color:#64748b;margin-top:3px}}
-    .score-item .sig{{font-size:10px;color:#94a3b8;margin-top:2px;line-height:1.4}}
-    ul{{margin:0;padding-left:18px}}li{{margin-bottom:6px;font-size:14px;line-height:1.6}}
-    .tags{{display:flex;flex-wrap:wrap;gap:8px}}
-    .tag{{padding:3px 10px;border-radius:16px;font-size:12px;background:#e0f2fe;color:#0369a1}}
-    .desc{{font-size:14px;color:#374151;line-height:1.7;background:#f0fdf4;padding:14px 16px;border-radius:8px;border-left:3px solid #22c55e}}
-    .bd-pitch{{font-size:14px;color:#374151;line-height:1.7;background:#fefce8;padding:14px 16px;border-radius:8px;border-left:3px solid #f59e0b}}
-    .two-col{{display:grid;grid-template-columns:1fr 1fr;gap:16px}}
-    .footer{{text-align:center;font-size:12px;color:#94a3b8;margin-top:28px}}
+    table{{width:100%;border-collapse:collapse}}
+    td,th{{padding:6px 8px;text-align:left;border-bottom:1px solid #f1f5f9;font-size:13px}}
+    th{{background:#f8fafc;color:#64748b;font-weight:600}}
+    tr:last-child td{{border-bottom:none}}
+    .rec-box{{border:2px solid;border-radius:10px;padding:16px 20px;margin-bottom:16px}}
+    .footer{{text-align:center;font-size:12px;color:#94a3b8;margin-top:28px;padding-bottom:40px}}
   </style>
 </head>
 <body>
   <div class="header">
-    <h1>{project.repo_full_name}</h1>
+    <h1>📊 {project.repo_full_name}</h1>
     <div class="meta">
+      YC 开源项目投资分析报告 &nbsp;·&nbsp;
       <a href="{project.repo_url}" style="color:#93c5fd">{project.repo_url}</a>
-      &nbsp;·&nbsp; 生成时间：{generated_at}
+      &nbsp;·&nbsp; {generated_at}
     </div>
   </div>
 
-  {desc_section}
+  <!-- 投资建议（置顶） -->
+  <div class="rec-box" style="border-color:{rec_color};background:{rec_color}18">
+    <div style="font-size:18px;font-weight:700;color:{rec_color};margin-bottom:6px">{rec}</div>
+    <div style="font-size:14px;color:#374151">
+      综合 YC 评分：<strong style="font-size:20px;color:#0f3460">{yc_score_100 if yc_score_100 else 'N/A'}</strong> / 100
+      &nbsp;·&nbsp; 等级：{grade_badge(score.grade) if score else '—'}
+      &nbsp;·&nbsp; 建议介入时机：{timing}
+    </div>
+    {bd_section_html}
+  </div>
 
+  <!-- 1. 项目概况 -->
   <div class="card">
-    <h2>评分概览</h2>
-    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
-      <span class="grade-badge grade-{grade}">{grade}</span>
-      <span style="font-size:28px;font-weight:700;color:#0f3460">{f"{total_score:.1f}" if total_score else "N/A"}</span>
-      <span style="color:#64748b;font-size:14px">/ 10.0</span>
-    </div>
-    <div class="score-grid">{score_cells_html}</div>
+    <h2>📋 项目概况</h2>
+    <table><tbody>{overview_html}</tbody></table>
   </div>
 
-  <div class="card">
-    <h2>商业画像 <span style="font-size:10px;font-weight:400;color:#94a3b8;text-transform:none;letter-spacing:0">Business Profile</span></h2>
-    <div class="tags" style="margin-bottom:14px">
-      <span class="tag" style="background:#ede9fe;color:#5b21b6">{biz.category if biz else "N/A"}</span>
-      {biz_tags_html}
-    </div>
-    {biz_meta_html}
-  </div>
-
-  {bd_section}
-
+  <!-- 2. Star 增长趋势 -->
   {star_chart_section}
 
-  <div class="two-col">
-    <div class="card"><h2>亮点</h2><ul>{highlights_html}</ul></div>
-    <div class="card"><h2>风险</h2><ul>{risks_html}</ul></div>
+  <!-- 3. Traction & Growth -->
+  {yc_card("Traction &amp; Growth", "📈 牵引力与增长", score.traction_score if score else None, traction_bullets)}
+
+  <!-- 4. Problem & Market -->
+  {yc_card("Problem &amp; Market", "🎯 问题与市场", score.market_score if score else None, market_bullets)}
+
+  <!-- 5. Product & Technology -->
+  {yc_card("Product &amp; Technology", "🛠 产品与技术", score.moat_score if score else None, moat_bullets)}
+
+  <!-- 6. Business Model -->
+  <div class="card">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <h2 style="margin:0;flex:1">💰 商业模式 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Business Model</span></h2>
+      {grade_badge(s2g(score.monetization_score if score else None))}
+    </div>
+    <table>
+      <thead><tr><th>变现方式</th><th>可行性</th><th>说明</th></tr></thead>
+      <tbody>{biz_table_rows}</tbody>
+    </table>
+    <div style="margin-top:10px;font-size:12px;color:#64748b">推荐销售动力：{_motion_desc_zh}</div>
   </div>
 
-  <div class="card"><h2>追问清单</h2><ul>{followups_html}</ul></div>
+  <!-- 7. Team & Community -->
+  {yc_card("Team &amp; Community", "👥 团队与社区", score.team_score if score else None, team_bullets)}
 
-  <div class="footer">Trend2Biz · 数据来源 GitHub Trending · 分析仅供参考</div>
+  <!-- 8. Risk Assessment -->
+  <div class="card">
+    <h2>⚠️ 风险评估 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Risk Assessment</span></h2>
+    <table>
+      <thead><tr><th>风险类型</th><th>等级</th><th>描述</th></tr></thead>
+      <tbody>{risk_rows_html}</tbody>
+    </table>
+  </div>
+
+  <!-- 9. YC 综合评分 -->
+  <div class="card">
+    <h2>🎯 YC 综合评分</h2>
+    <table>
+      <thead><tr><th>维度</th><th>权重</th><th>评级</th><th>得分</th></tr></thead>
+      <tbody>{yc_score_rows}{yc_total_row}</tbody>
+    </table>
+  </div>
+
+  <!-- 10. 建议行动 -->
+  <div class="card">
+    <h2>💡 建议行动清单</h2>
+    <ul style="margin:0;padding-left:18px">{checklist_html}</ul>
+  </div>
+
+  <div class="footer">
+    Trend2Biz · YC OSS Investment Analysis Skill · 数据来源 GitHub &amp; Trend2Biz DB · 分析仅供参考
+  </div>
 {chart_script}
 </body>
 </html>"""
