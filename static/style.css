@@ -1122,3 +1122,66 @@ footer {
   background: #6b3030; color: #ffb3b3; border: 1px solid #8b4040;
 }
 .jobs-retry-btn:disabled { opacity: .5; cursor: default; }
+
+/* ── v0.9 additions ──────────────────────────────────────────────────────── */
+
+/* Freshness indicator */
+.freshness-indicator {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  white-space: nowrap; line-height: 1;
+}
+.freshness-indicator.fresh { color: var(--success); background: rgba(74,222,128,.1); }
+.freshness-indicator.stale { color: #f59e0b; background: rgba(245,158,11,.1); }
+.freshness-indicator.old   { color: var(--danger); background: rgba(248,113,113,.1); }
+
+/* Watch button in table */
+.col-watch { width: 28px; padding: 0 2px; text-align: center; }
+.watch-btn {
+  background: none; border: none; cursor: pointer;
+  font-size: 15px; color: var(--text-dim); padding: 0 2px; line-height: 1;
+  transition: color .15s;
+}
+.watch-btn:hover, .watch-btn.watched { color: #f59e0b; }
+
+/* Watchlist toggle button */
+.watchlist-btn {
+  padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim);
+  transition: background .15s, color .15s;
+}
+.watchlist-btn:hover { color: var(--text); }
+.watchlist-btn.active { background: rgba(245,158,11,.15); color: #f59e0b; border-color: #f59e0b; }
+
+/* Search box */
+.search-wrap {
+  display: flex; align-items: center; gap: 2px;
+}
+.search-input {
+  width: 160px; padding: 5px 8px; border-radius: 6px; font-size: 13px;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+  outline: none; transition: border-color .15s, width .2s;
+}
+.search-input:focus { border-color: var(--accent); width: 200px; }
+.search-btn, .search-clear-btn {
+  background: none; border: none; cursor: pointer;
+  font-size: 14px; color: var(--text-dim); padding: 4px 5px; line-height: 1;
+}
+.search-btn:hover, .search-clear-btn:hover { color: var(--text); }
+
+/* Export dropdown */
+.export-wrap { position: relative; }
+.export-toggle-btn {
+  padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim);
+}
+.export-toggle-btn:hover { color: var(--text); }
+.export-menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 20;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.4); min-width: 90px; overflow: hidden;
+}
+.export-menu button {
+  display: block; width: 100%; padding: 8px 14px; text-align: left;
+  background: none; border: none; cursor: pointer; color: var(--text); font-size: 13px;
+}
+.export-menu button:hover { background: var(--surface2); }

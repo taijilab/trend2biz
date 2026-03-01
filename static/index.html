@@ -14,6 +14,11 @@
       <span class="subtitle">GitHub Trending · 商业分析</span>
     </div>
     <div class="header-right">
+      <div class="search-wrap">
+        <input type="search" id="search-input" class="search-input" placeholder="搜索项目/赛道…" autocomplete="off">
+        <button id="btn-search" class="search-btn" title="搜索">&#128269;</button>
+        <button id="btn-search-clear" class="search-clear-btn" title="清除搜索">&#10005;</button>
+      </div>
       <a href="/docs" target="_blank" class="api-link">API Docs</a>
       <button id="btn-jobs" class="settings-icon-btn" title="后台任务" style="margin-right:4px">&#128197;</button>
       <button id="btn-settings" class="settings-icon-btn" title="设置">&#9881;</button>
@@ -53,10 +58,23 @@
       </select>
     </div>
 
+    <button id="btn-watchlist" class="watchlist-btn" title="关注列表">&#9733; 关注列表</button>
+
     <button id="btn-fetch" class="fetch-btn">
       &#9889; 抓取 Trending
     </button>
     <button id="btn-refresh" class="refresh-btn" title="刷新">&#8635;</button>
+
+    <!-- Export dropdown -->
+    <div class="export-wrap">
+      <button class="export-toggle-btn" id="btn-export-toggle" title="导出数据">&#8595; 导出</button>
+      <div class="export-menu" id="export-menu" style="display:none">
+        <button id="btn-export-csv">CSV</button>
+        <button id="btn-export-json">JSON</button>
+      </div>
+    </div>
+
+    <span id="freshness-indicator" class="freshness-indicator"></span>
   </div>
 
   <div id="status-bar" class="status-bar" style="display:none"></div>
@@ -103,10 +121,34 @@
             </select>
           </div>
           <div class="settings-field">
-            <label for="settings-api-key">API Key</label>
+            <label for="settings-api-key">本地 API Key（仅本浏览器）</label>
             <input type="text" id="settings-api-key" class="settings-input" placeholder="粘贴您的 API Key…" autocomplete="new-password" spellcheck="false">
           </div>
-          <p class="settings-hint">llm-v1 可生成完整商业画像 + BD 话术。Key 仅存储在本地浏览器，不写入服务器。</p>
+          <p class="settings-hint">Key 仅存储在本地浏览器，不写入服务器。团队成员可配置服务器 Key（下方）共享使用。</p>
+        </section>
+        <section class="settings-section">
+          <h4 class="settings-section-title">服务器端 LLM Key（团队共享）</h4>
+          <div class="settings-field">
+            <label>当前状态</label>
+            <span id="settings-server-key-status" style="font-size:12px;color:var(--text-dim)">加载中…</span>
+          </div>
+          <div class="settings-field">
+            <label for="settings-server-llm-key">写入新 Key（覆盖）</label>
+            <input type="password" id="settings-server-llm-key" class="settings-input" placeholder="输入后保存即写入服务器…" autocomplete="new-password" spellcheck="false">
+          </div>
+          <p class="settings-hint">服务器 Key 优先于本地 Key，所有团队成员无需单独配置。Key 持久化至服务器 .keys.json 文件。</p>
+        </section>
+        <section class="settings-section">
+          <h4 class="settings-section-title">GitHub Token（提升 API 限额）</h4>
+          <div class="settings-field">
+            <label>当前状态</label>
+            <span id="settings-github-token-status" style="font-size:12px;color:var(--text-dim)">加载中…</span>
+          </div>
+          <div class="settings-field">
+            <label for="settings-github-token">写入 Token</label>
+            <input type="password" id="settings-github-token" class="settings-input" placeholder="ghp_… 或 github_pat_…" autocomplete="new-password" spellcheck="false">
+          </div>
+          <p class="settings-hint">不设置则 60 次/小时，设置后 5000 次/小时，显著提升指标采集准确性。</p>
         </section>
         <section class="settings-section">
           <h4 class="settings-section-title">自动采集</h4>
@@ -166,5 +208,20 @@
       <div id="kw-modal-body" class="kw-modal-body"></div>
     </div>
   </div>
+
+  <script>
+    // Export dropdown toggle
+    document.addEventListener('DOMContentLoaded', () => {
+      const toggle = document.getElementById('btn-export-toggle');
+      const menu = document.getElementById('export-menu');
+      if (toggle && menu) {
+        toggle.addEventListener('click', e => {
+          e.stopPropagation();
+          menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+        });
+        document.addEventListener('click', () => { menu.style.display = 'none'; });
+      }
+    });
+  </script>
 </body>
 </html>
