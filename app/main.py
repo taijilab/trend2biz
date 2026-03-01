@@ -1532,22 +1532,34 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             f'<canvas id="starChart" style="max-height:220px"></canvas>'
             f'{growth_table_html}</div>'
         )
-        _labels = _json.dumps(star_dates)
-        _data   = _json.dumps(star_values)
-        chart_script = (
-            '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>\n'
-            '<script>(function(){'
-            'var el=document.getElementById("starChart");if(!el)return;'
-            'new Chart(el,{type:"line",data:{labels:' + _labels + ','
-            'datasets:[{label:"Stars",data:' + _data + ','
+        _lbl = _json.dumps(star_dates)
+        _dat = _json.dumps(star_values)
+        # Build JS without f-string to avoid brace-escaping issues
+        _js = (
+            'new Chart(document.getElementById("starChart"),{'
+            'type:"line",'
+            'data:{labels:' + _lbl + ','
+            'datasets:[{label:"Stars",data:' + _dat + ','
             'borderColor:"#0f3460",backgroundColor:"rgba(15,52,96,0.08)",'
             'borderWidth:2,pointRadius:3,tension:0.3,fill:true}]},'
-            'options:{responsive:true,plugins:{legend:{display:false},'
-            'tooltip:{callbacks:{label:function(c){var v=c.parsed.y;'
-            'return"\\u2b50 "+(v>=1000?(v/1000).toFixed(1)+"k":v);}}}}}'
-            ',scales:{x:{ticks:{maxTicksLimit:8,font:{size:10}}},'
-            'y:{ticks:{font:{size:10},callback:function(v){return v>=1000?(v/1000).toFixed(0)+"k":v;}}}}'
-            '}});})();</script>'
+            'options:{responsive:true,'
+            'plugins:{legend:{display:false},'
+            'tooltip:{callbacks:{label:function(c){'
+            'var v=c.parsed.y;return(v>=1000?(v/1000).toFixed(1)+"k":""+v)+" \u2605";'
+            '}}}},'   # closes: function, callbacks, tooltip, plugins
+            'scales:{'
+            'x:{ticks:{maxTicksLimit:8,font:{size:10}}},'
+            'y:{ticks:{font:{size:10},callback:function(v){'
+            'return v>=1000?(v/1000).toFixed(0)+"k":v;'
+            '}}}}'    # closes: callback func, y.ticks, y, scales
+            '}});'    # closes: options, Chart config object, new Chart() call
+        )
+        chart_script = (
+            '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>'
+            '<script>window.addEventListener("DOMContentLoaded",function(){'
+            'var el=document.getElementById("starChart");if(!el)return;'
+            + _js +
+            '});</script>'
         )
 
     # ── section: traction ─────────────────────────────────────────────────────
@@ -1608,6 +1620,76 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         f"团队信号：{signals.get('team', '—')}",
         f"销售动力评估：{_motion_desc_zh}",
     ]
+
+    # ── section: competitor analysis ─────────────────────────────────────────
+    _comp_db: dict[str, list[tuple]] = {
+        "agent": [
+            ("LangChain",    "OSS",       "通用 LLM 链式框架", "生态最大；护城河弱，社区分裂"),
+            ("LlamaIndex",   "OSS+SaaS",  "RAG & Agent",       "数据连接强；偏检索场景"),
+            ("AutoGen",      "OSS",       "多 Agent 编排",     "微软背书；适合复杂对话流"),
+            ("CrewAI",       "OSS",       "角色分工 Agent",    "上手快；功能较局限"),
+        ],
+        "developer-tools": [
+            ("GitHub Copilot","SaaS",     "AI 代码补全",       "市场主导；封闭，价格高"),
+            ("Cursor",        "SaaS",     "AI IDE",            "开发者口碑好；依赖 Claude/GPT"),
+            ("Tabnine",       "OSS+SaaS", "本地代码补全",      "隐私友好；增速放缓"),
+        ],
+        "observability": [
+            ("Datadog",       "SaaS",     "全栈可观测",        "功能完整；价格贵，厂商锁定"),
+            ("Grafana",       "OSS+SaaS", "指标可视化",        "生态最大；配置复杂"),
+            ("OpenTelemetry", "OSS",      "标准协议层",        "CNCF 标准；非竞品，可互补"),
+        ],
+        "security": [
+            ("Snyk",          "SaaS",     "代码安全扫描",      "CI/CD 集成好；企业价格高"),
+            ("SonarQube",     "OSS+SaaS", "代码质量门禁",      "企业广用；UI 老旧"),
+            ("Wiz",           "SaaS",     "云安全态势",        "估值 120亿+；功能专注云"),
+        ],
+        "data": [
+            ("dbt",           "OSS+SaaS", "数据转换",          "Analytics 工程标准；ELT 专用"),
+            ("Airbyte",       "OSS",      "数据集成",          "连接器最多；资源消耗大"),
+            ("Apache Spark",  "OSS",      "大数据批处理",      "生态成熟；运维复杂"),
+        ],
+        "infra": [
+            ("Terraform",     "OSS",      "IaC 标准",          "用户最多；HCL 语言割裂"),
+            ("Pulumi",        "OSS+SaaS", "编程语言 IaC",      "开发者友好；社区较小"),
+            ("Ansible",       "OSS",      "配置管理",          "无 Agent；适合存量系统"),
+        ],
+        "fintech": [
+            ("Stripe",        "SaaS",     "支付 API",          "开发者首选；费率不低"),
+            ("Plaid",         "SaaS",     "银行数据连接",      "金融数据标准；监管敏感"),
+        ],
+        "edu-tech": [
+            ("Coursera",      "SaaS",     "在线课程平台",      "内容最多；变现靠认证"),
+            ("Duolingo",      "SaaS",     "语言学习",          "游戏化强；聚焦语言"),
+        ],
+        "biotech": [
+            ("Benchling",     "SaaS",     "生命科学 R&D 平台", "实验室标准；价格高"),
+            ("Dotmatics",     "SaaS",     "科学数据管理",      "大药企首选；封闭"),
+        ],
+    }
+    _cat_key  = (biz.category or "").lower().replace(" ", "-") if biz else ""
+    comp_list = _comp_db.get(_cat_key, [])
+    if not comp_list:
+        # Generic fallback: show placeholder
+        comp_list = [("（待补充）", "—", "同类开源/商业竞品", "需结合项目具体赛道人工补充")]
+
+    comp_rows_html = ""
+    for name, kind, pos, diff in comp_list:
+        comp_rows_html += (
+            f'<tr><td style="font-weight:600">{name}</td>'
+            f'<td><span style="font-size:11px;background:#e0f2fe;color:#0369a1;padding:2px 7px;border-radius:10px">{kind}</span></td>'
+            f'<td style="color:#374151">{pos}</td>'
+            f'<td style="color:#64748b;font-size:12px">{diff}</td></tr>'
+        )
+    comp_section_html = f"""
+    <div class="card">
+      <h2>🏁 竞品分析 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Competitive Landscape · {biz.category if biz else '—'} 赛道</span></h2>
+      <table>
+        <thead><tr><th>竞品</th><th>类型</th><th>定位</th><th>对比要点</th></tr></thead>
+        <tbody>{comp_rows_html}</tbody>
+      </table>
+      <div style="margin-top:10px;font-size:12px;color:#94a3b8">⚑ 竞品数据基于规则库，建议结合 AI 分析获取更精准对比</div>
+    </div>"""
 
     # ── section: risk ────────────────────────────────────────────────────────
     raw_risks = (score.risks or []) if score else []
@@ -1673,6 +1755,106 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     )
     bd_section_html = f'<div style="margin-top:10px;background:#fefce8;border-left:3px solid #f59e0b;padding:10px 14px;border-radius:6px;font-size:13px;line-height:1.7">{bd_pitch}</div>' if bd_pitch else ""
 
+    # ── markdown content generation ──────────────────────────────────────────
+    def _md_table(headers, rows):
+        sep = "|".join("---" for _ in headers)
+        lines = ["| " + " | ".join(headers) + " |", f"|{sep}|"]
+        for r in rows:
+            lines.append("| " + " | ".join(str(c) for c in r) + " |")
+        return "\n".join(lines)
+
+    _overview_md_rows = [
+        ("仓库", project.repo_url),
+        ("主语言", project.primary_language or "—"),
+        ("当前 Stars", fmt_num(cur_stars)),
+        ("Forks", fmt_num(cur_forks)),
+        ("Open Issues", fmt_num(cur_issues)),
+        ("贡献者 (90d)", fmt_num(cur_contribs)),
+        ("Commits (30d)", fmt_num(cur_commits)),
+        ("商业赛道", biz.category if biz else "—"),
+        ("变现形式", "、".join(biz.monetization_candidates or []) if biz else "—"),
+        ("销售动力", biz.sales_motion if biz else "—"),
+    ]
+    _growth_md_rows = [(r["month"], fmt_num(r["stars"]),
+                        f'+{fmt_num(r["delta"])}' if r["delta"] >= 0 else fmt_num(r["delta"]),
+                        f'{r["mom"]:+.1f}%') for r in growth_rows]
+    _biz_md_rows = [(item,
+                     "⭐⭐⭐" if item in ["SaaS","Cloud","API","Enterprise"] else "⭐⭐",
+                     biz.buyer or "技术团队") for item in mono_items[:5]] or [("暂无", "—", "—")]
+    _comp_md_rows = [(n, k, p, d) for n, k, p, d in comp_list]
+    _risk_md_rows = [(cat, risk_level_label.get(lvl, lvl), desc) for cat, lvl, desc in _risk_cat]
+    _yc_md_rows   = [(f"{zh} ({en})", f"{w:.0%}", s2g(v),
+                      f"{int(v*10)}/100" if v else "—") for en, zh, w, v in yc_dims]
+    _yc_md_rows.append(("综合得分", "100%", score.grade if score else "—",
+                         f"{yc_score_100}/100" if yc_score_100 else "—"))
+
+    md_lines = [
+        f"# {project.repo_full_name} — YC 开源投资分析报告",
+        f"",
+        f"> 生成时间：{generated_at} | {project.repo_url}",
+        f"",
+        f"## 投资建议",
+        f"",
+        f"**{rec}**  综合 YC 评分：**{yc_score_100 if yc_score_100 else 'N/A'} / 100**  等级：{score.grade if score else '—'}",
+        f"",
+        f"建议介入时机：{timing}",
+        f"",
+    ]
+    if bd_pitch:
+        md_lines += [f"> BD 话术：{bd_pitch}", ""]
+
+    md_lines += [
+        "## 项目概况", "",
+        _md_table(["指标", "值"], _overview_md_rows), "",
+        "## Star 增长趋势", "",
+    ]
+    if _growth_md_rows:
+        md_lines += [_md_table(["月份", "Stars", "月增量", "MoM%"], _growth_md_rows), ""]
+    else:
+        md_lines += ["暂无增长数据", ""]
+
+    def _yc_section_md(title_zh, title_en, grade_val, bullets):
+        lines = [f"## {title_zh} ({title_en}) — 评级：{s2g(grade_val)}", ""]
+        lines += [f"- {b}" for b in bullets if b and b != "—"]
+        lines.append("")
+        return lines
+
+    md_lines += _yc_section_md("牵引力与增长", "Traction & Growth",
+                                score.traction_score if score else None, traction_bullets)
+    md_lines += _yc_section_md("问题与市场", "Problem & Market",
+                                score.market_score if score else None, market_bullets)
+    md_lines += _yc_section_md("产品与技术", "Product & Technology",
+                                score.moat_score if score else None, moat_bullets)
+    md_lines += [
+        f"## 商业模式 (Business Model) — 评级：{s2g(score.monetization_score if score else None)}", "",
+        _md_table(["变现方式", "可行性", "说明"], _biz_md_rows), "",
+        f"推荐销售动力：{_motion_desc_zh}", "",
+    ]
+    md_lines += _yc_section_md("团队与社区", "Team & Community",
+                                score.team_score if score else None, team_bullets)
+    md_lines += [
+        "## 竞品分析 (Competitive Landscape)", "",
+        _md_table(["竞品", "类型", "定位", "对比要点"], _comp_md_rows), "",
+        "## 风险评估 (Risk Assessment)", "",
+        _md_table(["风险类型", "等级", "描述"], _risk_md_rows), "",
+    ]
+    if raw_risks:
+        md_lines += [f"- {r}" for r in raw_risks[:3]] + [""]
+    md_lines += [
+        "## YC 综合评分", "",
+        _md_table(["维度", "权重", "评级", "得分"], _yc_md_rows), "",
+        "## 建议行动清单", "",
+    ]
+    for item in (followups or default_actions)[:6]:
+        md_lines.append(f"- [ ] {item}")
+    md_lines += [
+        "",
+        "---",
+        "*Trend2Biz · YC OSS Investment Analysis · 数据来源 GitHub · 分析仅供参考*",
+    ]
+    import base64 as _b64
+    md_content_b64 = _b64.b64encode("\n".join(md_lines).encode()).decode()
+
     # ── HTML card helper ──────────────────────────────────────────────────────
     def yc_card(title_en, title_zh, grade_val, bullets):
         g = s2g(grade_val)
@@ -1687,6 +1869,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         </div>"""
 
     # ── assemble HTML ─────────────────────────────────────────────────────────
+    _repo_slug = project.repo_full_name.replace("/", "_")
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1705,6 +1888,18 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     tr:last-child td{{border-bottom:none}}
     .rec-box{{border:2px solid;border-radius:10px;padding:16px 20px;margin-bottom:16px}}
     .footer{{text-align:center;font-size:12px;color:#94a3b8;margin-top:28px;padding-bottom:40px}}
+    .dl-bar{{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}}
+    .dl-btn{{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;
+             font-size:13px;font-weight:600;cursor:pointer;border:none;text-decoration:none}}
+    .dl-btn-md{{background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0}}
+    .dl-btn-pdf{{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}}
+    .dl-btn:hover{{opacity:.85}}
+    @media print{{
+      .dl-bar,.footer{{display:none}}
+      body{{background:#fff;margin:0}}
+      .card{{break-inside:avoid;border:1px solid #ddd}}
+      .rec-box{{break-inside:avoid}}
+    }}
   </style>
 </head>
 <body>
@@ -1715,6 +1910,12 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
       <a href="{project.repo_url}" style="color:#93c5fd">{project.repo_url}</a>
       &nbsp;·&nbsp; {generated_at}
     </div>
+  </div>
+
+  <!-- 下载工具栏 -->
+  <div class="dl-bar">
+    <button class="dl-btn dl-btn-md" onclick="downloadMd()">⬇ 下载 Markdown</button>
+    <button class="dl-btn dl-btn-pdf" onclick="window.print()">🖨 导出 PDF（打印）</button>
   </div>
 
   <!-- 投资建议（置顶） -->
@@ -1762,7 +1963,10 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
   <!-- 7. Team & Community -->
   {yc_card("Team &amp; Community", "👥 团队与社区", score.team_score if score else None, team_bullets)}
 
-  <!-- 8. Risk Assessment -->
+  <!-- 8. Competitive Landscape -->
+  {comp_section_html}
+
+  <!-- 9. Risk Assessment -->
   <div class="card">
     <h2>⚠️ 风险评估 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Risk Assessment</span></h2>
     <table>
@@ -1771,7 +1975,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     </table>
   </div>
 
-  <!-- 9. YC 综合评分 -->
+  <!-- 10. YC 综合评分 -->
   <div class="card">
     <h2>🎯 YC 综合评分</h2>
     <table>
@@ -1780,7 +1984,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     </table>
   </div>
 
-  <!-- 10. 建议行动 -->
+  <!-- 11. 建议行动 -->
   <div class="card">
     <h2>💡 建议行动清单</h2>
     <ul style="margin:0;padding-left:18px">{checklist_html}</ul>
@@ -1789,6 +1993,20 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
   <div class="footer">
     Trend2Biz · YC OSS Investment Analysis Skill · 数据来源 GitHub &amp; Trend2Biz DB · 分析仅供参考
   </div>
+
+<script>
+var _mdB64 = "{md_content_b64}";
+function downloadMd() {{
+  var bytes = Uint8Array.from(atob(_mdB64), function(c){{return c.charCodeAt(0);}});
+  var md = new TextDecoder("utf-8").decode(bytes);
+  var blob = new Blob([md], {{type:"text/markdown;charset=utf-8"}});
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "{_repo_slug}_yc_report.md";
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){{document.body.removeChild(a);URL.revokeObjectURL(a.href);}}, 100);
+}}
+</script>
 {chart_script}
 </body>
 </html>"""
