@@ -42,6 +42,8 @@ from app.schemas import (
     BizProfileResp,
     JobDetailResp,
     JobResp,
+    RescheduleReq,
+    RetryJobReq,
     MetricPoint,
     MetricSeriesResp,
     ProjectListItem,
@@ -888,8 +890,8 @@ def list_jobs(
 
 
 @app.post(f"{settings.api_prefix}/jobs/{{job_id}}:retry", response_model=JobResp, status_code=202)
-def retry_job(job_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    """Create a new copy of a failed job and re-queue it."""
+def retry_job(job_id: str, req: RetryJobReq = RetryJobReq(), background_tasks: BackgroundTasks = None, db: Session = Depends(get_db)):
+    """Create a new copy of a failed job and re-queue it, optionally with a delay (minutes)."""
     job = db.get(Job, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
@@ -900,22 +902,31 @@ def retry_job(job_id: str, background_tasks: BackgroundTasks, db: Session = Depe
     new_job = create_job(db, job.job_type, payload)
     db.commit()
 
+    delay = max(0, req.delay_minutes)
     jt = job.job_type
+
+    def _dispatch(runner, *args):
+        if delay > 0:
+            from app.scheduler import schedule_one_time  # noqa: PLC0415
+            schedule_one_time(runner, *args, delay_minutes=delay)
+        else:
+            background_tasks.add_task(runner, *args)
+
     if jt == "trending_fetch":
         snap_date = date.fromisoformat(payload["date"]) if "date" in payload else date.today()
-        background_tasks.add_task(run_snapshot_fetch_job, new_job.job_id,
-                                  payload.get("since", "daily"), payload.get("language", "all"),
-                                  payload.get("spoken"), snap_date)
+        _dispatch(run_snapshot_fetch_job, new_job.job_id,
+                  payload.get("since", "daily"), payload.get("language", "all"),
+                  payload.get("spoken"), snap_date)
     elif jt == "metrics_refresh":
         metric_date = date.fromisoformat(payload["date"]) if "date" in payload else date.today()
-        background_tasks.add_task(run_metrics_refresh_job, new_job.job_id,
-                                  payload.get("project_id"), metric_date)
+        _dispatch(run_metrics_refresh_job, new_job.job_id,
+                  payload.get("project_id"), metric_date)
     elif jt == "biz_generate":
-        background_tasks.add_task(run_biz_generate_job, new_job.job_id,
-                                  payload.get("project_id"), payload.get("model", "rule-v1"))
+        _dispatch(run_biz_generate_job, new_job.job_id,
+                  payload.get("project_id"), payload.get("model", "rule-v1"))
     elif jt == "score_batch":
-        background_tasks.add_task(run_score_batch_job, new_job.job_id,
-                                  payload.get("snapshot_id"), payload.get("biz_model", "rule-v1"))
+        _dispatch(run_score_batch_job, new_job.job_id,
+                  payload.get("snapshot_id"), payload.get("biz_model", "rule-v1"))
     else:
         raise HTTPException(status_code=422, detail=f"cannot retry job_type {jt!r}")
 
@@ -927,6 +938,16 @@ def scheduler_status():
     """Return APScheduler state and next run times for each scheduled job."""
     from app.scheduler import get_scheduler_status  # noqa: PLC0415
     return get_scheduler_status()
+
+
+@app.post(f"{settings.api_prefix}/scheduler/reschedule")
+def scheduler_reschedule(req: RescheduleReq):
+    """Change the UTC hour:minute for a scheduled cron job."""
+    from app.scheduler import reschedule_job  # noqa: PLC0415
+    ok = reschedule_job(req.job_id, req.hour, req.minute)
+    if not ok:
+        raise HTTPException(status_code=404, detail="scheduler job not found or scheduler not running")
+    return {"ok": True, "job_id": req.job_id, "hour": req.hour, "minute": req.minute}
 
 
 @app.get(f"{settings.api_prefix}/trending/snapshots/dates")

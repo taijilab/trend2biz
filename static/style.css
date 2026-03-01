@@ -1094,4 +1094,31 @@ footer {
 }
 .jobs-sched-row:last-child { border-bottom: none; }
 .jobs-sched-name { flex: 1; color: var(--text-dim); }
-.jobs-sched-next { color: var(--text); white-space: nowrap; }
+.jobs-sched-next { color: var(--text); white-space: nowrap; font-size: 11px; }
+.jobs-sched-sep { color: var(--text-dim); font-weight: bold; }
+.jobs-sched-hour, .jobs-sched-min {
+  width: 44px; padding: 2px 4px; font-size: 12px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); text-align: center;
+  -moz-appearance: textfield;
+}
+.jobs-sched-hour::-webkit-inner-spin-button,
+.jobs-sched-min::-webkit-inner-spin-button { -webkit-appearance: none; }
+.jobs-sched-save-btn {
+  padding: 2px 8px; font-size: 11px; border-radius: 4px; cursor: pointer;
+  background: var(--accent); color: #fff; border: none;
+}
+.jobs-sched-save-btn:disabled { opacity: .5; cursor: default; }
+/* Retry row */
+.jobs-retry-row {
+  display: flex; align-items: center; gap: 6px; margin-top: 5px;
+}
+.jobs-retry-delay-sel {
+  font-size: 11px; padding: 2px 4px; border-radius: 4px; cursor: pointer;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+}
+.jobs-retry-btn {
+  padding: 2px 10px; font-size: 11px; border-radius: 4px; cursor: pointer;
+  background: #6b3030; color: #ffb3b3; border: 1px solid #8b4040;
+}
+.jobs-retry-btn:disabled { opacity: .5; cursor: default; }

@@ -53,6 +53,16 @@ class JobResp(BaseModel):
     status: str
 
 
+class RetryJobReq(BaseModel):
+    delay_minutes: int = 0
+
+
+class RescheduleReq(BaseModel):
+    job_id: str
+    hour: int = Field(ge=0, le=23)
+    minute: int = Field(ge=0, le=59)
+
+
 class ProjectListItem(BaseModel):
     project_id: str
     repo_full_name: str

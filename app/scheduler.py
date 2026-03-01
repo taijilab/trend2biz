@@ -37,6 +37,14 @@ except ImportError:  # pragma: no cover
 
 _scheduler: Optional[Any] = None
 
+# Default schedule config (UTC hour/minute). Updated in-memory by reschedule_job().
+_SCHED_CONFIG: dict[str, dict] = {
+    "daily_trending":          {"hour": 0, "minute": 10},
+    "weekly_monthly_trending": {"hour": 0, "minute": 20},
+    "metrics_refresh":         {"hour": 1, "minute": 0},
+    "biz_score":               {"hour": 1, "minute": 30},
+}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -238,6 +246,34 @@ def start_scheduler() -> None:
     logger.info("APScheduler started — 4 cron jobs scheduled (UTC)")
 
 
+def reschedule_job(job_id: str, hour: int, minute: int) -> bool:
+    """Change the cron time of an existing scheduled job. Returns True on success."""
+    global _SCHED_CONFIG
+    if not _HAS_SCHEDULER or not _scheduler:
+        return False
+    if not _scheduler.get_job(job_id):
+        return False
+    _scheduler.reschedule_job(job_id, trigger="cron", hour=hour, minute=minute)
+    _SCHED_CONFIG[job_id] = {"hour": hour, "minute": minute}
+    logger.info("Rescheduled %s to %02d:%02d UTC", job_id, hour, minute)
+    return True
+
+
+def schedule_one_time(func, *args, delay_minutes: int = 0, **kwargs) -> None:
+    """Run *func* once, optionally after a delay (in minutes)."""
+    import threading
+    from datetime import timezone
+
+    if not _HAS_SCHEDULER or not _scheduler or not _scheduler.running:
+        # Fallback: run in a plain daemon thread (immediate only)
+        threading.Thread(target=func, args=args, kwargs=kwargs, daemon=True).start()
+        return
+
+    run_date = datetime.now(tz=timezone.utc) + timedelta(minutes=max(0, delay_minutes))
+    _scheduler.add_job(func, "date", run_date=run_date, args=args, kwargs=kwargs)
+    logger.info("Scheduled one-time %s in %d min (at %s UTC)", func.__name__, delay_minutes, run_date.strftime("%H:%M"))
+
+
 def stop_scheduler() -> None:
     """Stop the scheduler gracefully."""
     global _scheduler
@@ -254,13 +290,17 @@ def get_scheduler_status() -> dict:
     jobs_info = []
     for job in _scheduler.get_jobs():
         nxt = job.next_run_time
+        cfg = _SCHED_CONFIG.get(job.id, {})
         jobs_info.append({
             "id": job.id,
             "next_run": nxt.isoformat() if nxt else None,
+            "hour": cfg.get("hour"),
+            "minute": cfg.get("minute"),
         })
 
     return {
         "enabled": True,
         "running": bool(_scheduler.running),
         "jobs": jobs_info,
+        "config": _SCHED_CONFIG,
     }

@@ -757,9 +757,17 @@ async function loadJobsPanel() {
               <span class="jobs-type-badge">${escHtml(label)}</span>
               <span class="jobs-fail-detail">${escHtml(detail)}</span>
               <span class="jobs-fail-time">${t}</span>
-              <button class="jobs-retry-btn" data-jid="${j.job_id}">重试</button>
             </div>
             ${errShort ? `<div class="jobs-fail-error" title="${escHtml(errMsg)}">${escHtml(errShort)}</div>` : ''}
+            <div class="jobs-retry-row">
+              <select class="jobs-retry-delay-sel" data-jid="${j.job_id}">
+                <option value="0">立即重试</option>
+                <option value="10">10 分钟后</option>
+                <option value="30">30 分钟后</option>
+                <option value="60">1 小时后</option>
+              </select>
+              <button class="jobs-retry-btn" data-jid="${j.job_id}">重试</button>
+            </div>
           </div>
         </div>`;
       }).join('');
@@ -779,9 +787,15 @@ async function loadJobsPanel() {
         schedSection.style.display = '';
         schedEl.innerHTML = sdata.jobs.map(j => {
           const lbl = SCHED_LABEL[j.id] || j.id;
-          return `<div class="jobs-sched-row">
+          const h = j.hour != null ? String(j.hour).padStart(2, '0') : '??';
+          const m = j.minute != null ? String(j.minute).padStart(2, '0') : '??';
+          return `<div class="jobs-sched-row" data-jid="${escHtml(j.id)}">
             <span class="jobs-sched-name">${escHtml(lbl)}</span>
             <span class="jobs-sched-next">${fmtNextRun(j.next_run)}</span>
+            <input class="jobs-sched-hour" type="number" min="0" max="23" value="${h}" title="小时 (UTC 0-23)">
+            <span class="jobs-sched-sep">:</span>
+            <input class="jobs-sched-min" type="number" min="0" max="59" value="${m}" title="分钟 (0-59)">
+            <button class="jobs-sched-save-btn" data-jid="${escHtml(j.id)}">保存</button>
           </div>`;
         }).join('');
       } else {
@@ -794,15 +808,48 @@ async function loadJobsPanel() {
 
 async function retryJob(jobId) {
   const btn = document.querySelector(`.jobs-retry-btn[data-jid="${jobId}"]`);
+  const sel = document.querySelector(`.jobs-retry-delay-sel[data-jid="${jobId}"]`);
+  const delayMinutes = sel ? parseInt(sel.value, 10) : 0;
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   try {
-    const res = await apiFetch(`${API}/jobs/${jobId}:retry`, { method: 'POST' });
+    const res = await apiFetch(`${API}/jobs/${jobId}:retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delay_minutes: delayMinutes }),
+    });
     if (!res.ok) throw new Error(await res.text());
-    if (btn) { btn.textContent = '已入队'; }
-    setTimeout(loadJobsPanel, 1500);
+    const label = delayMinutes > 0 ? `${delayMinutes}分后` : '已入队';
+    if (btn) { btn.textContent = label; }
+    setTimeout(loadJobsPanel, delayMinutes > 0 ? 2000 : 1500);
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = '重试'; }
     alert('重试失败: ' + e.message);
+  }
+}
+
+async function saveSchedJob(jobId) {
+  const row = document.querySelector(`.jobs-sched-row[data-jid="${jobId}"]`);
+  if (!row) return;
+  const hourVal = parseInt(row.querySelector('.jobs-sched-hour').value, 10);
+  const minVal  = parseInt(row.querySelector('.jobs-sched-min').value,  10);
+  if (isNaN(hourVal) || isNaN(minVal) || hourVal < 0 || hourVal > 23 || minVal < 0 || minVal > 59) {
+    alert('时间格式错误：小时 0-23，分钟 0-59');
+    return;
+  }
+  const btn = row.querySelector('.jobs-sched-save-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const res = await apiFetch(`${API}/scheduler/reschedule`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: jobId, hour: hourVal, minute: minVal }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    if (btn) { btn.textContent = '已保存'; setTimeout(() => { if (btn) btn.textContent = '保存'; btn.disabled = false; }, 2000); }
+    setTimeout(loadJobsPanel, 2200);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '保存'; }
+    alert('保存失败: ' + e.message);
   }
 }
 
@@ -828,6 +875,10 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('jobs-fail-list').addEventListener('click', e => {
     const btn = e.target.closest('.jobs-retry-btn');
     if (btn) retryJob(btn.dataset.jid);
+  });
+  document.getElementById('jobs-schedule').addEventListener('click', e => {
+    const btn = e.target.closest('.jobs-sched-save-btn');
+    if (btn) saveSchedJob(btn.dataset.jid);
   });
 
   // Settings modal
