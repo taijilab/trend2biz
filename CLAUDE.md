@@ -2,35 +2,57 @@
 
 ## 自动合并流程
 
-每次完成任务（所有代码已推送到 `claude/*` 分支后），**必须执行以下步骤把代码自动合并到 `main`**：
+每次完成任务（所有代码已推送到 `claude/*` 分支后），**必须通过 Gitea API 自动创建并合并 PR，不需要人工操作**。
+
+### 步骤
 
 ```bash
-# 1. 确认当前 claude/* 分支已推送成功
+# 1. 先推送 claude/* 分支
 git push -u origin <current-claude-branch>
 
-# 2. 切换到 main，拉取最新
-git fetch origin main
-git checkout main
-git pull origin main
+# 2. 用 Gitea API 创建 PR 并立即合并（替换变量后执行）
+BRANCH="<current-claude-branch>"
+GITEA="http://127.0.0.1:19175"
+REPO="taijilab/trend2biz"
+TOKEN="$(git config --get gitea.token 2>/dev/null || echo '')"
 
-# 3. 合并 claude 分支（fast-forward 优先，否则创建 merge commit）
-git merge --no-ff <current-claude-branch> -m "Merge <branch> into main\n\nhttps://claude.ai/code/<session-id>"
+# 2a. 创建 PR
+PR_NUM=$(curl -s -X POST "$GITEA/api/v1/repos/$REPO/pulls" \
+  -H "Content-Type: application/json" \
+  ${TOKEN:+-H "Authorization: token $TOKEN"} \
+  -d "{\"title\":\"Auto-merge $BRANCH\",\"head\":\"$BRANCH\",\"base\":\"main\",\"body\":\"Auto-merged by Claude\"}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('number',''))")
 
-# 4. 推送 main
-git push origin main
+# 2b. 合并 PR
+curl -s -X POST "$GITEA/api/v1/repos/$REPO/pulls/$PR_NUM/merge" \
+  -H "Content-Type: application/json" \
+  ${TOKEN:+-H "Authorization: token $TOKEN"} \
+  -d '{"Do":"merge","merge_message_field":"Auto-merged by Claude"}'
 
-# 5. 切回 claude 分支继续工作（若还有后续）
-git checkout <current-claude-branch>
+echo "PR #$PR_NUM merged into main"
 ```
 
-> 这样就不需要人工在 Gitea 点击 "Merge PR"。
+### 如果 Gitea 关闭了分支保护（最简方式）
+
+直接 push main，无需 PR：
+
+```bash
+git fetch origin main
+git checkout main && git pull origin main
+git merge --no-ff <current-claude-branch> -m "Merge <branch> into main"
+git push origin main
+git checkout <current-claude-branch>
+```
 
 ## 开发规范
 
 - 所有新功能开发在 `claude/*` 分支（由系统 prompt 指定）
-- 单次任务完成 → 立即合并到 `main` → 推送
+- 单次任务完成 → 推送 → **自动合并到 main**（上方流程）
 - commit message 末尾始终附上 Claude session URL
-- Python 代码变更后必须 `python3 -c "import ast; ast.parse(open('app/main.py').read())"` 验证语法
+- Python 代码变更后必须验证语法：
+  ```bash
+  python3 -c "import ast; ast.parse(open('app/main.py').read()); print('OK')"
+  ```
 
 ## 项目结构
 
