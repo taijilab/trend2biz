@@ -364,6 +364,7 @@ function analysisHtml(row, rowIdx) {
           ${grade ? gradeBadgeHtml(grade) : ''}
           ${total ? `<span class="score-num">${total}</span>` : ''}
           ${row.project_id ? `<button class="report-btn" onclick="generateReport('${row.project_id}')" title="生成一页报告">&#128196;</button>` : ''}
+          ${row.project_id ? `<button class="reanalyze-btn" onclick="startAnalysis(${rowIdx})" title="重新分析（刷新指标+评分）">&#9889;</button>` : ''}
         </div>
         ${catVal ? `<button class="kw-tag kw-cat" data-kw="${escHtml(catVal)}">${escHtml(catVal)}</button>` : ''}
         ${monoList.length ? `<div class="kw-tags">${monoList.map(m => `<button class="kw-tag kw-mono" data-kw="${escHtml(m)}">${escHtml(m)}</button>`).join('')}</div>` : ''}
