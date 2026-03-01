@@ -198,12 +198,17 @@ def compute_score(metrics: dict, biz: Optional[dict]) -> dict:
                 "category": biz.get("category") if biz else None,
             },
             "signals_text": {
-                "market": f"类别={biz.get('category') if biz else 'N/A'} → market_base={market_base:.1f} → score={round(market, 2)}",
-                "traction": f"stars={stars}, commits_30d={commits_30d} → score={round(traction, 2)}",
-                "moat": f"contributors_90d={contributors_90d} → score={round(moat, 2)}",
-                "team": f"contributors_90d={contributors_90d} → score={round(team, 2)}",
-                "monetization": f"monetization_candidates={'有' if biz and biz.get('monetization_candidates') else '无'} → score={monetization}",
-                "risk": f"contributors_90d={'≥5' if contributors_90d >= 5 else '<5'} → score={risk}",
+                "market": f"商业赛道：{biz.get('category') if biz else 'N/A'}，市场评分 {round(market, 1)}",
+                "traction": f"{stars:,} Stars，近 30 天 {commits_30d} 次提交，牵引力评分 {round(traction, 1)}",
+                "moat": f"近 90 天 {contributors_90d} 位活跃贡献者，护城河评分 {round(moat, 1)}",
+                "team": (
+                    f"近 90 天 {contributors_90d} 位活跃贡献者，多团队规模，单点风险低" if contributors_90d >= 30 else
+                    f"近 90 天 {contributors_90d} 位活跃贡献者，中等规模，有外部参与" if contributors_90d >= 10 else
+                    f"近 90 天 {contributors_90d} 位活跃贡献者，小团队，主要由核心作者驱动" if contributors_90d >= 3 else
+                    f"近 90 天 {contributors_90d} 位活跃贡献者，高度依赖核心作者，单点风险高"
+                ),
+                "monetization": f"变现路径{'已识别' if biz and biz.get('monetization_candidates') else '待挖掘'}，评分 {monetization}",
+                "risk": f"贡献者{'充足（≥5 人）' if contributors_90d >= 5 else '不足（<5 人）'}，风险评分 {risk}",
             },
         },
     }

@@ -1812,11 +1812,19 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     else:
         _owner_label = f"维护者：{_owner_login or '—'}"
 
+    _n = cur_contribs or 0
+    _team_health = (
+        f"多团队规模（{_n} 人活跃），外部贡献充分，单点风险低" if _n >= 30 else
+        f"中等规模（{_n} 人活跃），有一定外部贡献" if _n >= 10 else
+        f"小团队（{_n} 人活跃），主要由核心作者驱动" if _n >= 3 else
+        f"极小团队（{_n} 人活跃），高度依赖核心作者" if _n > 0 else
+        "贡献者数据待采集"
+    )
     team_bullets = [
         _owner_label,
         f"近 90 天贡献者数：{fmt_num(cur_contribs)}",
         f"主维护者集中度：{pct(bus_factor)}（>50% 表示单点风险）" if bus_factor else "主维护者集中度：数据待采集",
-        f"团队信号：{signals.get('team', '—')}",
+        f"团队健康度：{_team_health}",
         f"销售动力评估：{_motion_desc_zh}",
     ]
 
