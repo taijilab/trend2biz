@@ -98,7 +98,7 @@ logger = logging.getLogger("trend2biz")
 # Version / Build
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 
 def _git_short_hash() -> str:
     # Vercel 部署时无 .git 目录，优先读 Vercel 注入的 commit SHA
