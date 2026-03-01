@@ -1618,13 +1618,15 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         return f"{v:.0%}"
 
     # ── YC dimensions ────────────────────────────────────────────────────────
+    _hype_score = (score.explanations or {}).get("hype_score") if score else None
     yc_dims = [
-        ("Traction & Growth",    "牵引力与增长",  0.30, score.traction_score    if score else None),
-        ("Problem & Market",     "问题与市场",    0.20, score.market_score       if score else None),
-        ("Product & Technology", "产品与技术",    0.20, score.moat_score         if score else None),
-        ("Business Model",       "商业模式",      0.15, score.monetization_score if score else None),
-        ("Team & Community",     "团队与社区",    0.05, score.team_score         if score else None),
-        ("Risk (inverted)",      "风险(反转)",    0.10, (10 - score.risk_score)  if score and score.risk_score else None),
+        ("Traction & Growth",    "牵引力与增长",  0.18, score.traction_score    if score else None),
+        ("Problem & Market",     "问题与市场",    0.18, score.market_score       if score else None),
+        ("Hype & Media",         "媒体与热度",    0.12, _hype_score),
+        ("Product & Technology", "产品与技术",    0.13, score.moat_score         if score else None),
+        ("Team & Community",     "团队与社区",    0.14, score.team_score         if score else None),
+        ("Business Model",       "商业模式",      0.13, score.monetization_score if score else None),
+        ("Risk (inverted)",      "风险(反转)",    0.12, (10 - score.risk_score)  if score and score.risk_score else None),
     ]
     yc_score_100 = None
     if score:
@@ -1828,6 +1830,147 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         f"销售动力评估：{_motion_desc_zh}",
     ]
 
+    # ── section: 公司/组织背景 ─────────────────────────────────────────────────
+    company_section_html = ""
+    company_md_lines: list = []
+    if _otype == "Organization":
+        _ci        = expl.get("company_info") or {}
+        _funding   = expl.get("funding_rounds") or []
+        _revenue   = expl.get("revenue_info") or {}
+        _comm_land = expl.get("commercial_landscape") or ""
+        _strategic = expl.get("strategic_updates") or ""
+        _cp_risks  = expl.get("company_project_risk") or []
+
+        def _ci_val(key, default="⚠️ 待调研"):
+            v = _ci.get(key)
+            return str(v) if v not in (None, "", []) else default
+
+        _gv = _ci.get("github_verified")
+        _gv_str = "是" if _gv is True else ("否" if _gv is False else "⚠️ 待调研")
+
+        _basic_rows_html = "".join(
+            '<tr>'
+            f'<td style="color:#64748b;width:130px;padding:5px 8px;font-size:13px">{k}</td>'
+            f'<td style="padding:5px 8px;font-size:13px;font-weight:500">{v}</td>'
+            '</tr>'
+            for k, v in [
+                ("GitHub 主页",      f'<a href="https://github.com/{_ologin}" style="color:#0f3460">{_ologin}</a>'),
+                ("官网",             _ci_val("website")),
+                ("法人结构",         _ci_val("legal_structure")),
+                ("在招岗位数",       _ci_val("open_roles")),
+                ("项目角色",         _ci_val("project_role")),
+                ("GitHub Verified",  _gv_str),
+            ]
+        )
+
+        _h3 = '<h3 style="font-size:12px;color:#64748b;margin:14px 0 6px;text-transform:uppercase;letter-spacing:.05em">'
+        if _funding:
+            _fund_rows = "".join(
+                f'<tr><td>{r.get("round","—")}</td><td>{r.get("amount","—")}</td>'
+                f'<td>{r.get("date","—")}</td>'
+                f'<td style="color:#64748b;font-size:12px">{r.get("investors","—")}</td></tr>'
+                for r in _funding[:6]
+            )
+            _fund_section = (
+                _h3 + '融资历史</h3>'
+                '<table><thead><tr><th>轮次</th><th>金额</th><th>时间</th><th>投资方</th></tr></thead>'
+                f'<tbody>{_fund_rows}</tbody></table>'
+            )
+        else:
+            _fund_section = (
+                _h3 + '融资历史</h3>'
+                '<p style="color:#94a3b8;font-size:13px">⚠️ 未发现公开融资信息</p>'
+            )
+
+        _rev_rows_html = "".join(
+            '<tr>'
+            f'<td style="color:#64748b;width:130px;padding:5px 8px;font-size:13px">{k}</td>'
+            f'<td style="padding:5px 8px;font-size:13px;font-weight:500">{v}</td>'
+            '</tr>'
+            for k, v in [
+                ("ARR/收入",   _revenue.get("arr")             or "⚠️ 未公开"),
+                ("付费客户数", _revenue.get("customers")        or "⚠️ 未公开"),
+                ("定价",       _revenue.get("pricing")          or "⚠️ 未公开"),
+                ("知名客户",   _revenue.get("notable_clients")  or "⚠️ 未公开"),
+            ]
+        )
+        _rev_section = _h3 + '收入与客户</h3><table><tbody>' + _rev_rows_html + '</tbody></table>'
+
+        _comm_html = (
+            f'<p style="font-size:13px;color:#374151;line-height:1.6;margin:8px 0">{_comm_land}</p>'
+            if _comm_land else
+            '<p style="color:#94a3b8;font-size:13px">⚠️ 待调研 — 可通过 /yc-oss-investment-analysis skill 补充</p>'
+        )
+        _strat_html = (
+            f'<p style="font-size:13px;color:#374151;line-height:1.6;margin:8px 0">{_strategic}</p>'
+            if _strategic else
+            '<p style="color:#94a3b8;font-size:13px">⚠️ 待调研</p>'
+        )
+
+        _default_cp_risks = [
+            "商业公司控制 OSS 项目存在 License 变更风险（参考 HashiCorp、Redis 案例）",
+            "公司融资压力可能影响社区优先级",
+            "商业版与开源版功能边界可能随时间模糊化",
+        ]
+        _cp_items = _cp_risks or _default_cp_risks
+        _cp_risk_html = "".join(
+            f'<li style="font-size:13px;color:#374151;margin-bottom:4px">{r}</li>'
+            for r in _cp_items[:5]
+        )
+
+        company_section_html = (
+            '<div class="card">'
+            '<h2>🏢 公司/组织背景 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Organization Context</span></h2>'
+            + _h3 + '基本信息</h3>'
+            + '<table><tbody>' + _basic_rows_html + '</tbody></table>'
+            + _fund_section
+            + _rev_section
+            + _h3 + '商业版图</h3>' + _comm_html
+            + _h3 + '战略动态</h3>' + _strat_html
+            + _h3 + '公司 vs 项目风险</h3>'
+            + '<ul style="margin:0;padding-left:18px">' + _cp_risk_html + '</ul>'
+            + '<div style="margin-top:12px;padding:8px 12px;background:#f0f9ff;border-radius:6px;font-size:12px;color:#0369a1">'
+            + '💡 通过 <code>/yc-oss-investment-analysis</code> skill 可补充完整的公司背景信息'
+            + '</div></div>'
+        )
+
+        _fund_md = []
+        if _funding:
+            _fund_md = (
+                ["| 轮次 | 金额 | 时间 | 投资方 |", "|---|---|---|---|"] +
+                [f"| {r.get('round','—')} | {r.get('amount','—')} | {r.get('date','—')} | {r.get('investors','—')} |"
+                 for r in _funding[:6]] + [""]
+            )
+        else:
+            _fund_md = ["⚠️ 未发现公开融资信息", ""]
+
+        company_md_lines = (
+            ["## 公司/组织背景 (Organization Context)", "",
+             "### 基本信息", "",
+             "| 指标 | 值 |", "|---|---|",
+             f"| GitHub 主页 | https://github.com/{_ologin} |",
+             f"| 官网 | {_ci_val('website')} |",
+             f"| 法人结构 | {_ci_val('legal_structure')} |",
+             f"| 在招岗位数 | {_ci_val('open_roles')} |",
+             f"| 项目角色 | {_ci_val('project_role')} |",
+             f"| GitHub Verified | {_gv_str} |",
+             "", "### 融资历史", ""] +
+            _fund_md +
+            ["### 收入与客户", "",
+             "| 指标 | 值 |", "|---|---|",
+             f"| ARR/收入 | {_revenue.get('arr') or '⚠️ 未公开'} |",
+             f"| 付费客户数 | {_revenue.get('customers') or '⚠️ 未公开'} |",
+             f"| 定价 | {_revenue.get('pricing') or '⚠️ 未公开'} |",
+             f"| 知名客户 | {_revenue.get('notable_clients') or '⚠️ 未公开'} |",
+             "", "### 商业版图", "",
+             _comm_land or "⚠️ 待调研 — 可通过 /yc-oss-investment-analysis skill 补充",
+             "", "### 战略动态", "",
+             _strategic or "⚠️ 待调研",
+             "", "### 公司 vs 项目风险", ""] +
+            [f"- {r}" for r in _cp_items[:5]] +
+            ["", "> 💡 通过 `/yc-oss-investment-analysis` skill 可补充完整的公司背景信息", ""]
+        )
+
     # ── section: competitor analysis ─────────────────────────────────────────
     # tuples: (name, kind, pos, diff, github_url)
     _comp_db: dict[str, list[tuple]] = {
@@ -2025,6 +2168,9 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     md_lines += [
         "## 项目概况", "",
         _md_table(["指标", "值"], _overview_md_rows), "",
+    ]
+    md_lines += company_md_lines
+    md_lines += [
         "## Star 增长趋势", "",
     ]
     if _growth_md_rows:
@@ -2066,7 +2212,55 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     ]
     for item in (followups or default_actions)[:6]:
         md_lines.append(f"- [ ] {item}")
+    # ── data validation table ─────────────────────────────────────────────────
+    def _chk(ok: bool) -> str:
+        return "✅" if ok else "⚠️"
+
+    _validation_rows: list = [
+        (_chk(cur_stars is not None),
+         "Stars 精确数字",
+         "已从 GitHub API 获取" if cur_stars is not None else "使用 Trending 爬虫估算"),
+        (_chk(project.license_spdx is not None),
+         "License 类型",
+         project.license_spdx or "未识别"),
+        (_chk(biz is not None and biz.category is not None),
+         "产品真实类别",
+         biz.category if biz else "未分析"),
+        (_chk(project.owner_type is not None),
+         "仓库所有者类型",
+         project.owner_type or "未采集"),
+    ]
+    if _otype == "Organization":
+        _comp_info2 = expl.get("company_info") or {}
+        _fr = expl.get("funding_rounds") or []
+        _validation_rows += [
+            (_chk(bool(_comp_info2.get("website"))),
+             "组织官网",
+             _comp_info2.get("website") or "⚠️ 待调研"),
+            (_chk(bool(_fr)),
+             "组织融资信息",
+             f"{len(_fr)} 条记录" if _fr else "⚠️ 未找到"),
+            (_chk(bool(expl.get("revenue_info"))),
+             "组织收入/客户",
+             "已获取" if expl.get("revenue_info") else "⚠️ 未公开"),
+            (_chk(bool(_comp_info2.get("project_role"))),
+             "项目在公司中的角色",
+             _comp_info2.get("project_role") or "⚠️ 待调研"),
+        ]
+    _validation_rows += [
+        (_chk(score is not None and score.team_score is not None),
+         "创始团队信息",
+         "已评分" if score and score.team_score else "⚠️ 未评分"),
+        (_chk(bool(comp_list) and comp_list[0][0] != "（待补充）"),
+         "竞品数据",
+         f"{len(comp_list)} 个竞品" if comp_list and comp_list[0][0] != "（待补充）" else "⚠️ 使用占位符"),
+        (_chk(bool(_hype_score)),
+         "媒体/社区信号",
+         f"得分 {_hype_score}" if _hype_score else "⚠️ 未获取（可通过 skill 补充）"),
+    ]
     md_lines += [
+        "## 数据校验状态", "",
+        _md_table(["状态", "检查点", "说明"], _validation_rows), "",
         "",
         "---",
         "*Trend2Biz · YC OSS Investment Analysis · 数据来源 GitHub · 分析仅供参考*",
@@ -2154,7 +2348,10 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     <table><tbody>{overview_html}</tbody></table>
   </div>
 
-  <!-- 2. Star 增长趋势 -->
+  <!-- 2. 公司/组织背景 -->
+  {company_section_html}
+
+  <!-- 3. Star 增长趋势 -->
   {star_chart_section}
 
   <!-- 3. Traction & Growth -->
