@@ -749,12 +749,18 @@ async function loadJobsPanel() {
         const p = j.payload || {};
         const detail = p.since ? `${p.since}/${p.language}` : (p.project_id || '').slice(0, 8);
         const t = fmtJobTime(j.created_at);
-        const errTip = j.error ? ` title="${escHtml(j.error)}"` : '';
-        return `<div class="jobs-fail-row"${errTip}>
-          <span class="jobs-type-badge">${escHtml(label)}</span>
-          <span class="jobs-fail-detail">${escHtml(detail)}</span>
-          <span class="jobs-fail-time">${t}</span>
-          <button class="jobs-retry-btn" data-jid="${j.job_id}">重试</button>
+        const errMsg = j.error || '';
+        const errShort = errMsg.length > 80 ? errMsg.slice(0, 80) + '…' : errMsg;
+        return `<div class="jobs-fail-row">
+          <div class="jobs-fail-main">
+            <div class="jobs-fail-top">
+              <span class="jobs-type-badge">${escHtml(label)}</span>
+              <span class="jobs-fail-detail">${escHtml(detail)}</span>
+              <span class="jobs-fail-time">${t}</span>
+              <button class="jobs-retry-btn" data-jid="${j.job_id}">重试</button>
+            </div>
+            ${errShort ? `<div class="jobs-fail-error" title="${escHtml(errMsg)}">${escHtml(errShort)}</div>` : ''}
+          </div>
         </div>`;
       }).join('');
     }
