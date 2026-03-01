@@ -33,6 +33,8 @@ class Project(Base):
     created_at_github: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at_github: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     pushed_at_github: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    owner_login: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    owner_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)   # "User" | "Organization"
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 

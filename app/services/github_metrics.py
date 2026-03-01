@@ -94,6 +94,7 @@ def fetch_repo_metrics(repo_full_name: str, token: Optional[str] = None) -> dict
             commits_90d = c90
         break  # Non-202 response (success or error) — stop retrying
 
+    owner = data.get("owner") or {}
     return {
         "stars": data.get("stargazers_count"),
         "forks": data.get("forks_count"),
@@ -108,6 +109,8 @@ def fetch_repo_metrics(repo_full_name: str, token: Optional[str] = None) -> dict
         "created_at_github": data.get("created_at"),
         "updated_at_github": data.get("updated_at"),
         "pushed_at_github": data.get("pushed_at"),
+        "owner_login": owner.get("login"),
+        "owner_type": owner.get("type"),  # "User" | "Organization"
     }
 
 
