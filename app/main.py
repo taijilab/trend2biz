@@ -1795,61 +1795,69 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     ]
 
     # ── section: competitor analysis ─────────────────────────────────────────
+    # tuples: (name, kind, pos, diff, github_url)
     _comp_db: dict[str, list[tuple]] = {
         "agent": [
-            ("LangChain",    "OSS",       "通用 LLM 链式框架", "生态最大；护城河弱，社区分裂"),
-            ("LlamaIndex",   "OSS+SaaS",  "RAG & Agent",       "数据连接强；偏检索场景"),
-            ("AutoGen",      "OSS",       "多 Agent 编排",     "微软背书；适合复杂对话流"),
-            ("CrewAI",       "OSS",       "角色分工 Agent",    "上手快；功能较局限"),
+            ("LangChain",    "OSS",       "通用 LLM 链式框架", "生态最大；护城河弱，社区分裂",   "https://github.com/langchain-ai/langchain"),
+            ("LlamaIndex",   "OSS+SaaS",  "RAG & Agent",       "数据连接强；偏检索场景",         "https://github.com/run-llama/llama_index"),
+            ("AutoGen",      "OSS",       "多 Agent 编排",     "微软背书；适合复杂对话流",       "https://github.com/microsoft/autogen"),
+            ("CrewAI",       "OSS",       "角色分工 Agent",    "上手快；功能较局限",             "https://github.com/crewAIInc/crewAI"),
         ],
         "developer-tools": [
-            ("GitHub Copilot","SaaS",     "AI 代码补全",       "市场主导；封闭，价格高"),
-            ("Cursor",        "SaaS",     "AI IDE",            "开发者口碑好；依赖 Claude/GPT"),
-            ("Tabnine",       "OSS+SaaS", "本地代码补全",      "隐私友好；增速放缓"),
+            ("GitHub Copilot","SaaS",     "AI 代码补全",       "市场主导；封闭，价格高",         "https://github.com/github"),
+            ("Cursor",        "SaaS",     "AI IDE",            "开发者口碑好；依赖 Claude/GPT",  "https://github.com/getcursor/cursor"),
+            ("Tabnine",       "OSS+SaaS", "本地代码补全",      "隐私友好；增速放缓",             "https://github.com/codota/TabNine"),
         ],
         "observability": [
-            ("Datadog",       "SaaS",     "全栈可观测",        "功能完整；价格贵，厂商锁定"),
-            ("Grafana",       "OSS+SaaS", "指标可视化",        "生态最大；配置复杂"),
-            ("OpenTelemetry", "OSS",      "标准协议层",        "CNCF 标准；非竞品，可互补"),
+            ("Datadog",       "SaaS",     "全栈可观测",        "功能完整；价格贵，厂商锁定",     "https://github.com/DataDog"),
+            ("Grafana",       "OSS+SaaS", "指标可视化",        "生态最大；配置复杂",             "https://github.com/grafana/grafana"),
+            ("OpenTelemetry", "OSS",      "标准协议层",        "CNCF 标准；非竞品，可互补",      "https://github.com/open-telemetry/opentelemetry-specification"),
         ],
         "security": [
-            ("Snyk",          "SaaS",     "代码安全扫描",      "CI/CD 集成好；企业价格高"),
-            ("SonarQube",     "OSS+SaaS", "代码质量门禁",      "企业广用；UI 老旧"),
-            ("Wiz",           "SaaS",     "云安全态势",        "估值 120亿+；功能专注云"),
+            ("Snyk",          "SaaS",     "代码安全扫描",      "CI/CD 集成好；企业价格高",       "https://github.com/snyk/snyk"),
+            ("SonarQube",     "OSS+SaaS", "代码质量门禁",      "企业广用；UI 老旧",              "https://github.com/SonarSource/sonarqube"),
+            ("Wiz",           "SaaS",     "云安全态势",        "估值 120亿+；功能专注云",        "https://github.com/wiz-sec"),
         ],
         "data": [
-            ("dbt",           "OSS+SaaS", "数据转换",          "Analytics 工程标准；ELT 专用"),
-            ("Airbyte",       "OSS",      "数据集成",          "连接器最多；资源消耗大"),
-            ("Apache Spark",  "OSS",      "大数据批处理",      "生态成熟；运维复杂"),
+            ("dbt",           "OSS+SaaS", "数据转换",          "Analytics 工程标准；ELT 专用",   "https://github.com/dbt-labs/dbt-core"),
+            ("Airbyte",       "OSS",      "数据集成",          "连接器最多；资源消耗大",         "https://github.com/airbytehq/airbyte"),
+            ("Apache Spark",  "OSS",      "大数据批处理",      "生态成熟；运维复杂",             "https://github.com/apache/spark"),
         ],
         "infra": [
-            ("Terraform",     "OSS",      "IaC 标准",          "用户最多；HCL 语言割裂"),
-            ("Pulumi",        "OSS+SaaS", "编程语言 IaC",      "开发者友好；社区较小"),
-            ("Ansible",       "OSS",      "配置管理",          "无 Agent；适合存量系统"),
+            ("Terraform",     "OSS",      "IaC 标准",          "用户最多；HCL 语言割裂",         "https://github.com/hashicorp/terraform"),
+            ("Pulumi",        "OSS+SaaS", "编程语言 IaC",      "开发者友好；社区较小",           "https://github.com/pulumi/pulumi"),
+            ("Ansible",       "OSS",      "配置管理",          "无 Agent；适合存量系统",         "https://github.com/ansible/ansible"),
         ],
         "fintech": [
-            ("Stripe",        "SaaS",     "支付 API",          "开发者首选；费率不低"),
-            ("Plaid",         "SaaS",     "银行数据连接",      "金融数据标准；监管敏感"),
+            ("Stripe",        "SaaS",     "支付 API",          "开发者首选；费率不低",           "https://github.com/stripe"),
+            ("Plaid",         "SaaS",     "银行数据连接",      "金融数据标准；监管敏感",         "https://github.com/plaid"),
         ],
         "edu-tech": [
-            ("Coursera",      "SaaS",     "在线课程平台",      "内容最多；变现靠认证"),
-            ("Duolingo",      "SaaS",     "语言学习",          "游戏化强；聚焦语言"),
+            ("Coursera",      "SaaS",     "在线课程平台",      "内容最多；变现靠认证",           "https://github.com/coursera"),
+            ("Duolingo",      "SaaS",     "语言学习",          "游戏化强；聚焦语言",             "https://github.com/duolingo"),
         ],
         "biotech": [
-            ("Benchling",     "SaaS",     "生命科学 R&D 平台", "实验室标准；价格高"),
-            ("Dotmatics",     "SaaS",     "科学数据管理",      "大药企首选；封闭"),
+            ("Benchling",     "SaaS",     "生命科学 R&D 平台", "实验室标准；价格高",             "https://github.com/benchling"),
+            ("Dotmatics",     "SaaS",     "科学数据管理",      "大药企首选；封闭",               ""),
         ],
     }
     _cat_key  = (biz.category or "").lower().replace(" ", "-") if biz else ""
     comp_list = _comp_db.get(_cat_key, [])
     if not comp_list:
         # Generic fallback: show placeholder
-        comp_list = [("（待补充）", "—", "同类开源/商业竞品", "需结合项目具体赛道人工补充")]
+        comp_list = [("（待补充）", "—", "同类开源/商业竞品", "需结合项目具体赛道人工补充", "")]
 
     comp_rows_html = ""
-    for name, kind, pos, diff in comp_list:
+    for name, kind, pos, diff, gh_url in comp_list:
+        name_cell = (
+            f'<a href="{gh_url}" target="_blank" rel="noopener" '
+            f'style="font-weight:600;color:#1e40af;text-decoration:none">'
+            f'{name}&nbsp;↗</a>'
+            if gh_url else
+            f'<span style="font-weight:600">{name}</span>'
+        )
         comp_rows_html += (
-            f'<tr><td style="font-weight:600">{name}</td>'
+            f'<tr><td>{name_cell}</td>'
             f'<td><span style="font-size:11px;background:#e0f2fe;color:#0369a1;padding:2px 7px;border-radius:10px">{kind}</span></td>'
             f'<td style="color:#374151">{pos}</td>'
             f'<td style="color:#64748b;font-size:12px">{diff}</td></tr>'
@@ -1954,7 +1962,10 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     _biz_md_rows = [(item,
                      "⭐⭐⭐" if item in ["SaaS","Cloud","API","Enterprise"] else "⭐⭐",
                      biz.buyer or "技术团队") for item in mono_items[:5]] or [("暂无", "—", "—")]
-    _comp_md_rows = [(n, k, p, d) for n, k, p, d in comp_list]
+    _comp_md_rows = [
+        (f"[{n}]({gh})" if gh else n, k, p, d)
+        for n, k, p, d, gh in comp_list
+    ]
     _risk_md_rows = [(cat, risk_level_label.get(lvl, lvl), desc) for cat, lvl, desc in _risk_cat]
     _yc_md_rows   = [(f"{zh} ({en})", f"{w:.0%}", s2g(v),
                       f"{int(v*10)}/100" if v else "—") for en, zh, w, v in yc_dims]
