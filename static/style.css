@@ -807,7 +807,7 @@ footer {
 
   .trend-table tr.trend-row {
     display: grid;
-    grid-template-columns: 34px 1fr auto;
+    grid-template-columns: 34px 1fr 116px;
     grid-template-rows: auto auto;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -883,23 +883,34 @@ footer {
     grid-row: 1 / span 2;
     border: none;
     border-left: 1px solid var(--border);
-    min-width: 108px;
-    max-width: 150px;
+    width: 116px;
+    min-width: 0;
+    max-width: 116px;
     padding: 0;
+    overflow: hidden;
   }
   td.col-analysis .cell {
-    padding: 10px 10px 10px 8px;
+    padding: 8px 8px 8px 6px;
     min-height: unset;
     align-items: flex-start;
+    min-width: 0;
+    overflow: hidden;
   }
-  .col-analysis { width: auto; }
+  .col-analysis { width: 116px; }
 
   /* Score / biz tags in analysis cell */
-  .score-info { gap: 4px; }
+  .score-info { gap: 4px; min-width: 0; }
+  .score-row  { flex-wrap: wrap; gap: 4px; }
   .kw-tags { gap: 2px; }
   .kw-tag { font-size: 10px; padding: 1px 5px; }
-  .biz-monetization { font-size: 10px; }
+  .biz-monetization { font-size: 10px; max-width: 100px; }
   .analyze-btn { font-size: 11px; padding: 4px 8px; }
+
+  /* Report btn: icon only on mobile (hide "报告" text via font-size trick) */
+  .report-btn { font-size: 10px; padding: 2px 5px; }
+  .report-btn .report-label { display: none; }
+  /* Reanalyze btn: slightly larger touch target */
+  .reanalyze-btn { font-size: 13px; opacity: 0.55; padding: 2px 4px; }
 
   /* Modals → centered, full-width with edge padding */
   .kw-modal,
