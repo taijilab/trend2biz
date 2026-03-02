@@ -143,6 +143,8 @@ def compute_score(metrics: dict, biz: Optional[dict]) -> dict:
     stars = metrics.get("stars") or 0
     commits_30d = metrics.get("commits_30d") or 0
     contributors_90d = metrics.get("contributors_90d") or 0
+    bus_factor = metrics.get("bus_factor_top1_share") or 0.0
+    license_spdx = (metrics.get("license_spdx") or "").upper()
 
     # Resolve market base: prefer biz.explanations.market_base, fall back to category map
     market_base = 5.2
@@ -156,9 +158,58 @@ def compute_score(metrics: dict, biz: Optional[dict]) -> dict:
     market = min(10.0, market_base)
     traction = min(10.0, 4.0 + stars / 10000 + commits_30d / 100)
     moat = min(10.0, 4.5 + contributors_90d / 20)
+
+    # team — penalize high bus_factor (single-maintainer concentration)
     team = min(10.0, 4.0 + contributors_90d / 30)
-    monetization = 7.5 if biz and biz.get("monetization_candidates") else 5.0
+    if bus_factor > 0.7:
+        team = max(1.0, team - 1.0)
+    elif bus_factor > 0.5:
+        team = max(1.0, team - 0.5)
+
+    # monetization — 4-tier based on candidate type
+    if biz and biz.get("monetization_candidates"):
+        mc = biz["monetization_candidates"]
+        if any(m.lower() in ("saas", "cloud", "enterprise", "api") for m in mc):
+            monetization = 7.5  # clear commercial path
+        else:
+            monetization = 6.5  # candidates exist but non-mainstream
+    else:
+        monetization = 5.0  # no monetization signal
+    # bonus if ARR data exists
+    if biz:
+        _biz_expl = biz.get("explanations") or {}
+        if isinstance(_biz_expl.get("revenue_info"), dict) and _biz_expl["revenue_info"].get("arr"):
+            monetization = min(10.0, monetization + 1.5)
+
+    # risk — base on contributors, then adjust for license and bus_factor
     risk = 7.0 if contributors_90d >= 5 else 5.5
+    if "AGPL" in license_spdx or "GPL" in license_spdx:
+        risk -= 0.5   # copyleft reduces commercial risk score
+    if "BUSL" in license_spdx or "SSPL" in license_spdx:
+        risk -= 1.0   # source-available / commercial restriction
+    if "MIT" in license_spdx or "APACHE" in license_spdx:
+        risk += 0.3   # permissive license bonus
+    if bus_factor > 0.8:
+        risk -= 1.0   # extreme single-maintainer risk
+    elif bus_factor > 0.5:
+        risk -= 0.5   # moderate single-maintainer risk
+    risk = max(1.0, min(10.0, risk))
+
+    # hype score — based on star growth acceleration
+    hype_score: Optional[float] = None
+    star_history = metrics.get("star_history") or []
+    if len(star_history) >= 3:
+        # star_history: list of (date_str, stars_int) sorted ascending
+        try:
+            recent_growth = (star_history[-1][1] - star_history[-2][1]) / max(star_history[-2][1], 1)
+            prev_growth   = (star_history[-2][1] - star_history[-3][1]) / max(star_history[-3][1], 1)
+            acceleration  = recent_growth - prev_growth
+            hype_score = min(10.0, max(1.0, 5.0 + acceleration * 20 + stars / 20000))
+        except Exception:
+            pass
+    if hype_score is None:
+        # fallback: pure absolute star volume
+        hype_score = min(10.0, max(1.0, 4.5 + stars / 20000))
 
     total = (
         market * 0.25
@@ -197,6 +248,7 @@ def compute_score(metrics: dict, biz: Optional[dict]) -> dict:
                 "contributors_90d": contributors_90d,
                 "category": biz.get("category") if biz else None,
             },
+            "hype_score": round(hype_score, 2),
             "signals_text": {
                 "market": f"商业赛道：{biz.get('category') if biz else 'N/A'}，市场评分 {round(market, 1)}",
                 "traction": f"{stars:,} Stars，近 30 天 {commits_30d} 次提交，牵引力评分 {round(traction, 1)}",
@@ -207,8 +259,9 @@ def compute_score(metrics: dict, biz: Optional[dict]) -> dict:
                     f"近 90 天 {contributors_90d} 位活跃贡献者，小团队，主要由核心作者驱动" if contributors_90d >= 3 else
                     f"近 90 天 {contributors_90d} 位活跃贡献者，高度依赖核心作者，单点风险高"
                 ),
-                "monetization": f"变现路径{'已识别' if biz and biz.get('monetization_candidates') else '待挖掘'}，评分 {monetization}",
-                "risk": f"贡献者{'充足（≥5 人）' if contributors_90d >= 5 else '不足（<5 人）'}，风险评分 {risk}",
+                "monetization": f"变现路径{'已识别' if biz and biz.get('monetization_candidates') else '待挖掘'}，评分 {round(monetization, 1)}",
+                "risk": f"贡献者{'充足（≥5 人）' if contributors_90d >= 5 else '不足（<5 人）'}，License:{license_spdx or '未知'}，风险评分 {round(risk, 1)}",
+                "hype": f"Hype 评分 {round(hype_score, 1)}（{'基于增长加速度' if len(star_history) >= 3 else '基于绝对星数'}）",
             },
         },
     }

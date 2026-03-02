@@ -104,7 +104,7 @@ logger = logging.getLogger("trend2biz")
 # Version / Build
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "1.0.0"
 
 def _git_short_hash() -> str:
     # Vercel 部署时无 .git 目录，优先读 Vercel 注入的 commit SHA
@@ -615,7 +615,15 @@ def generate_biz_profile_llm(
         f'  "sales_motion": "PLG 或 Enterprise",\n'
         f'  "confidence": 0.0到1.0之间的置信度数字,\n'
         f'  "description_zh": "2-3句中文项目介绍：说清楚是什么、解决什么问题、适合谁用",\n'
-        f'  "bd_pitch": "3句话BD话术：①合作价值主张 ②对方核心痛点 ③我方可提供资源"\n'
+        f'  "bd_pitch": "3句话BD话术：①合作价值主张 ②对方核心痛点 ③我方可提供资源",\n'
+        f'  "competitors": [\n'
+        f'    {{"name": "竞品名", "kind": "OSS|SaaS|OSS+SaaS", "pos": "定位（中文，15字内）", "diff": "与本项目差异（15字内）", "url": "https://github.com/...或空字符串"}}\n'
+        f'    // 列出3-5个该赛道真实竞品，按市场影响力排序\n'
+        f'  ],\n'
+        f'  "project_risks": [\n'
+        f'    {{"type": "风险类型（中文，8字内）", "level": "high|medium|low", "desc": "结合本项目具体情况描述（30字内）"}}\n'
+        f'    // 列出3-5条针对本项目的特定风险（License、技术、竞争、商业化等）\n'
+        f'  ]\n'
         f'}}'
     )
 
@@ -628,7 +636,7 @@ def generate_biz_profile_llm(
                 json={
                     "model": "deepseek/deepseek-chat-v3-0324:free",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 800,
+                    "max_tokens": 1500,
                 },
                 timeout=60,
             )
@@ -644,7 +652,7 @@ def generate_biz_profile_llm(
                 json={
                     "model": "glm-4-flash",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 800,
+                    "max_tokens": 1500,
                 },
                 timeout=60,
             )
@@ -658,7 +666,7 @@ def generate_biz_profile_llm(
             client = anthropic.Anthropic(api_key=api_key)
             msg = client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=800,
+                max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = msg.content[0].text.strip() or None
@@ -699,6 +707,8 @@ def generate_biz_profile_llm(
             "signals": [repo_name, description or ""],
             "description_zh": data.get("description_zh"),
             "bd_pitch": data.get("bd_pitch"),
+            "competitors": data.get("competitors") or [],
+            "project_risks": data.get("project_risks") or [],
         },
     }
 
@@ -1642,6 +1652,23 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         if v is None: return "—"
         return f"{v:.0%}"
 
+    def _license_badge(spdx: str) -> str:
+        """Return license text with a friendliness badge."""
+        if not spdx or spdx == "—":
+            return '— <span style="font-size:11px;color:#94a3b8">待确认 —</span>'
+        spdx_up = spdx.upper()
+        if any(k in spdx_up for k in ("MIT", "APACHE", "BSD", "ISC", "UNLICENSE", "CC0")):
+            badge = '<span style="font-size:11px;background:#dcfce7;color:#16a34a;padding:2px 7px;border-radius:10px;margin-left:6px">商业友好 ✅</span>'
+        elif "AGPL" in spdx_up:
+            badge = '<span style="font-size:11px;background:#fee2e2;color:#dc2626;padding:2px 7px;border-radius:10px;margin-left:6px">强传染性 ⚠️⚠️</span>'
+        elif "GPL" in spdx_up or "LGPL" in spdx_up:
+            badge = '<span style="font-size:11px;background:#fef9c3;color:#b45309;padding:2px 7px;border-radius:10px;margin-left:6px">传染性 ⚠️</span>'
+        elif any(k in spdx_up for k in ("BUSL", "SSPL", "BSL", "COMMERCIAL")):
+            badge = '<span style="font-size:11px;background:#fee2e2;color:#dc2626;padding:2px 7px;border-radius:10px;margin-left:6px">商业受限 ❌</span>'
+        else:
+            badge = '<span style="font-size:11px;color:#94a3b8;margin-left:6px">待确认 —</span>'
+        return spdx + badge
+
     # ── YC dimensions ────────────────────────────────────────────────────────
     _hype_score = (score.explanations or {}).get("hype_score") if score else None
     yc_dims = [
@@ -1702,7 +1729,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         ("商业赛道", biz.category if biz else "—"),
         ("变现形式", "、".join(biz.monetization_candidates or []) if biz else "—"),
         ("销售动力", biz.sales_motion if biz else "—"),
-        ("License", expl.get("license") or "—"),
+        ("License", _license_badge(expl.get("license") or "")),
     ]
     overview_html = "".join(
         f'<tr><td style="color:#64748b;width:130px;padding:6px 8px;vertical-align:top;font-size:13px">{k}</td>'
@@ -2043,8 +2070,20 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             ("Dotmatics",     "SaaS",     "科学数据管理",      "大药企首选；封闭",               ""),
         ],
     }
+    # Prefer LLM-generated competitors; fall back to static _comp_db
+    _llm_competitors = expl.get("competitors") or []
     _cat_key  = (biz.category or "").lower().replace(" ", "-") if biz else ""
-    comp_list = _comp_db.get(_cat_key, [])
+    _comp_source_label = ""
+    if _llm_competitors:
+        # LLM competitors: list of {name, kind, pos, diff, url}
+        comp_list = [
+            (c.get("name", "—"), c.get("kind", "—"), c.get("pos", "—"), c.get("diff", "—"), c.get("url", ""))
+            for c in _llm_competitors if isinstance(c, dict)
+        ]
+        _comp_source_label = "AI 动态生成"
+    else:
+        comp_list = _comp_db.get(_cat_key, [])
+        _comp_source_label = "规则库"
     if not comp_list:
         # Generic fallback: show placeholder
         comp_list = [("（待补充）", "—", "同类开源/商业竞品", "需结合项目具体赛道人工补充", "")]
@@ -2064,6 +2103,11 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             f'<td style="color:#374151">{pos}</td>'
             f'<td style="color:#64748b;font-size:12px">{diff}</td></tr>'
         )
+    _comp_hint = (
+        "⚡ 竞品由 AI 动态分析生成，仅供参考"
+        if _llm_competitors else
+        "⚑ 竞品数据基于规则库，建议通过 llm-v1 获取 AI 动态分析"
+    )
     comp_section_html = f"""
     <div class="card">
       <h2>🏁 竞品分析 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Competitive Landscape · {biz.category if biz else '—'} 赛道</span></h2>
@@ -2071,21 +2115,33 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         <thead><tr><th>竞品</th><th>类型</th><th>定位</th><th>对比要点</th></tr></thead>
         <tbody>{comp_rows_html}</tbody>
       </table></div>
-      <div style="margin-top:10px;font-size:12px;color:#94a3b8">⚑ 竞品数据基于规则库，建议结合 AI 分析获取更精准对比</div>
+      <div style="margin-top:10px;font-size:12px;color:#94a3b8">{_comp_hint}</div>
     </div>"""
 
     # ── section: risk ────────────────────────────────────────────────────────
     raw_risks = (score.risks or []) if score else []
     risk_score_inv = (10 - score.risk_score) if score and score.risk_score else None
 
-    _risk_cat = [
-        ("大厂竞争风险",   "medium", "大型云厂商或开源基金会可能推出竞品"),
-        ("License 风险",  "low",    f"当前 License：{expl.get('license', '待确认')}"),
-        ("维护者单点风险", "high" if bus_factor and bus_factor > 0.5 else "low",
-         f"主维护者集中度 {pct(bus_factor)}，{'需引入更多 Contributor' if bus_factor and bus_factor > 0.5 else '贡献分布健康'}"),
-        ("商业化转化风险", "medium", "从 OSS 用户转为付费用户需要明确的企业版价值主张"),
-        ("技术过时风险",   "low",    f"主语言 {project.primary_language or '未知'}，{signals.get('moat', '技术细节待评估')}"),
-    ]
+    # Prefer LLM-generated project_risks; fall back to dynamic static risks
+    _llm_risks = expl.get("project_risks") or []
+    if _llm_risks:
+        _risk_cat = [
+            (r.get("type", "风险"), r.get("level", "medium"), r.get("desc", ""))
+            for r in _llm_risks if isinstance(r, dict)
+        ][:5]
+    else:
+        _license_spdx = expl.get("license", "") or ""
+        _license_lvl = "high" if "AGPL" in _license_spdx.upper() or "BUSL" in _license_spdx.upper() else (
+            "medium" if "GPL" in _license_spdx.upper() else "low"
+        )
+        _risk_cat = [
+            ("大厂竞争风险",   "medium", "大型云厂商或开源基金会可能推出竞品"),
+            ("License 风险",  _license_lvl, f"当前 License：{_license_spdx or '待确认'}"),
+            ("维护者单点风险", "high" if bus_factor and bus_factor > 0.5 else "low",
+             f"主维护者集中度 {pct(bus_factor)}，{'需引入更多 Contributor' if bus_factor and bus_factor > 0.5 else '贡献分布健康'}"),
+            ("商业化转化风险", "medium", "从 OSS 用户转为付费用户需要明确的企业版价值主张"),
+            ("技术过时风险",   "low",    f"主语言 {project.primary_language or '未知'}，{signals.get('moat', '技术细节待评估')}"),
+        ]
     risk_level_color = {"high": "#ef4444", "medium": "#f59e0b", "low": "#22c55e"}
     risk_level_label = {"high": "高", "medium": "中", "low": "低"}
     risk_rows_html = ""
@@ -2532,46 +2588,84 @@ def trigger_company_research(project_id: str, background_tasks: BackgroundTasks,
 
 @app.get(f"{settings.api_prefix}/projects/search")
 def search_projects(
-    q: str = Query(..., min_length=1, max_length=100),
+    q: str = Query(default="", max_length=100),
+    category: Optional[str] = Query(default=None, max_length=50),
+    grade: Optional[str] = Query(default=None, pattern="^[SABC]$"),
+    min_stars: Optional[int] = Query(default=None, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
-    """Full-text search across repo name, description, Chinese description, category, monetization."""
-    like = f"%{q}%"
-    # First find matching projects
-    matched_projects = db.execute(
-        select(Project).where(
-            or_(
-                Project.repo_full_name.ilike(like),
-                Project.description.ilike(like),
-            )
-        ).order_by(desc(Project.last_seen_at)).limit(limit)
-    ).scalars().all()
-    pid_set = {p.project_id for p in matched_projects}
+    """Full-text search across repo name, description, category. Supports grade/category/min_stars filters."""
+    # Collect candidate project_ids from keyword search
+    pid_set: set = set()
+    matched_projects: list = []
 
-    # Also search biz profiles (category, monetization_candidates, description_zh stored in explanations)
-    biz_matches = db.execute(
-        select(BizProfile).where(
-            or_(
-                BizProfile.category.ilike(like),
-            )
-        ).order_by(desc(BizProfile.created_at))
-    ).scalars().all()
-    extra_pids = [b.project_id for b in biz_matches if b.project_id not in pid_set]
-    if extra_pids:
-        extra_projects = db.execute(
-            select(Project).where(Project.project_id.in_(extra_pids[:limit]))
+    if q:
+        like = f"%{q}%"
+        proj_matches = db.execute(
+            select(Project).where(
+                or_(
+                    Project.repo_full_name.ilike(like),
+                    Project.description.ilike(like),
+                )
+            ).order_by(desc(Project.last_seen_at)).limit(limit * 2)
         ).scalars().all()
-        matched_projects = list(matched_projects) + extra_projects
+        for p in proj_matches:
+            if p.project_id not in pid_set:
+                pid_set.add(p.project_id)
+                matched_projects.append(p)
 
+        # Also search biz profiles by category keyword
+        biz_kw_matches = db.execute(
+            select(BizProfile).where(BizProfile.category.ilike(like))
+            .order_by(desc(BizProfile.created_at))
+        ).scalars().all()
+        extra_pids = [b.project_id for b in biz_kw_matches if b.project_id not in pid_set]
+        if extra_pids:
+            extra_projects = db.execute(
+                select(Project).where(Project.project_id.in_(extra_pids[:limit]))
+            ).scalars().all()
+            for p in extra_projects:
+                if p.project_id not in pid_set:
+                    pid_set.add(p.project_id)
+                    matched_projects.append(p)
+    else:
+        # No keyword: return all projects ordered by recency (filtered below)
+        all_projects = db.execute(
+            select(Project).order_by(desc(Project.last_seen_at)).limit(limit * 3)
+        ).scalars().all()
+        for p in all_projects:
+            pid_set.add(p.project_id)
+            matched_projects.append(p)
+
+    # Apply grade / category / min_stars filters in-memory (post-join)
     items = []
     seen_pids: set = set()
-    for p in matched_projects[:limit]:
+    for p in matched_projects:
         if p.project_id in seen_pids:
             continue
         seen_pids.add(p.project_id)
         score = latest_score(db, p.project_id)
         biz = latest_biz(db, p.project_id)
+
+        # Filter: grade
+        if grade and (not score or score.grade != grade):
+            continue
+        # Filter: category
+        if category and (not biz or (biz.category or "").lower() != category.lower()):
+            continue
+        # Filter: min_stars (use latest metrics or snapshot hint)
+        if min_stars is not None:
+            latest_m = db.execute(
+                select(RepoMetricDaily)
+                .where(RepoMetricDaily.project_id == p.project_id)
+                .order_by(desc(RepoMetricDaily.metric_date))
+                .limit(1)
+            ).scalar_one_or_none()
+            _stars = latest_m.stars if latest_m and latest_m.stars else 0
+            if _stars < min_stars:
+                continue
+
         items.append(ProjectListItem(
             project_id=p.project_id,
             repo_full_name=p.repo_full_name,
@@ -2585,6 +2679,8 @@ def search_projects(
                 "bd_pitch": (biz.explanations or {}).get("bd_pitch"),
             } if biz else None,
         ))
+        if len(items) >= limit:
+            break
     return {"items": items, "total": len(items)}
 
 
