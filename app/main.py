@@ -1898,8 +1898,8 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             )
             _fund_section = (
                 _h3 + '融资历史</h3>'
-                '<table><thead><tr><th>轮次</th><th>金额</th><th>时间</th><th>投资方</th></tr></thead>'
-                f'<tbody>{_fund_rows}</tbody></table>'
+                '<div class="tbl-wrap"><table><thead><tr><th>轮次</th><th>金额</th><th>时间</th><th>投资方</th></tr></thead>'
+                f'<tbody>{_fund_rows}</tbody></table></div>'
             )
         else:
             _fund_section = (
@@ -1919,7 +1919,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
                 ("知名客户",   _revenue.get("notable_clients")  or "⚠️ 未公开"),
             ]
         )
-        _rev_section = _h3 + '收入与客户</h3><table><tbody>' + _rev_rows_html + '</tbody></table>'
+        _rev_section = _h3 + '收入与客户</h3><div class="tbl-wrap"><table><tbody>' + _rev_rows_html + '</tbody></table></div>'
 
         _comm_html = (
             f'<p style="font-size:13px;color:#374151;line-height:1.6;margin:8px 0">{_comm_land}</p>'
@@ -1947,7 +1947,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             '<div class="card">'
             '<h2>🏢 公司/组织背景 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Organization Context</span></h2>'
             + _h3 + '基本信息</h3>'
-            + '<table><tbody>' + _basic_rows_html + '</tbody></table>'
+            + '<div class="tbl-wrap"><table><tbody>' + _basic_rows_html + '</tbody></table></div>'
             + _fund_section
             + _rev_section
             + _h3 + '商业版图</h3>' + _comm_html
@@ -2067,10 +2067,10 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     comp_section_html = f"""
     <div class="card">
       <h2>🏁 竞品分析 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Competitive Landscape · {biz.category if biz else '—'} 赛道</span></h2>
-      <table>
+      <div class="tbl-wrap"><table>
         <thead><tr><th>竞品</th><th>类型</th><th>定位</th><th>对比要点</th></tr></thead>
         <tbody>{comp_rows_html}</tbody>
-      </table>
+      </table></div>
       <div style="margin-top:10px;font-size:12px;color:#94a3b8">⚑ 竞品数据基于规则库，建议结合 AI 分析获取更精准对比</div>
     </div>"""
 
@@ -2312,15 +2312,17 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{project.repo_full_name} — YC 投资分析报告</title>
   <style>
-    body{{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;color:#1a1a2e;background:#f8fafc}}
-    .header{{background:linear-gradient(135deg,#0f3460 0%,#16213e 100%);color:#fff;padding:28px 32px;border-radius:12px;margin-bottom:20px}}
+    body{{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;color:#1a1a2e;background:#f8fafc;box-sizing:border-box}}
+    .header{{background:linear-gradient(135deg,#0f3460 0%,#16213e 100%);color:#fff;padding:28px 32px;border-radius:12px;margin-bottom:20px;word-break:break-all}}
     .header h1{{margin:0 0 6px;font-size:22px;font-weight:700}}
-    .header .meta{{font-size:13px;opacity:.8}}
+    .header .meta{{font-size:13px;opacity:.8;word-break:break-word}}
     .card{{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:20px 24px;margin-bottom:16px}}
     .card h2{{font-size:12px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin:0 0 12px}}
-    table{{width:100%;border-collapse:collapse}}
+    .tbl-wrap{{overflow-x:auto;-webkit-overflow-scrolling:touch}}
+    table{{width:100%;border-collapse:collapse;min-width:280px}}
     td,th{{padding:6px 8px;text-align:left;border-bottom:1px solid #f1f5f9;font-size:13px}}
     th{{background:#f8fafc;color:#64748b;font-weight:600}}
     tr:last-child td{{border-bottom:none}}
@@ -2332,6 +2334,14 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     .dl-btn-md{{background:#f0fdf4;color:#16a34a;border:1px solid #bbf7d0}}
     .dl-btn-pdf{{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe}}
     .dl-btn:hover{{opacity:.85}}
+    @media(max-width:600px){{
+      body{{margin:12px auto;padding:0 12px}}
+      .header{{padding:16px;border-radius:8px}}
+      .header h1{{font-size:16px}}
+      .card{{padding:14px 12px}}
+      .rec-box{{padding:12px 14px}}
+      td,th{{font-size:12px;padding:5px 6px}}
+    }}
     @media print{{
       .dl-bar,.footer{{display:none}}
       body{{background:#fff;margin:0}}
@@ -2359,10 +2369,10 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
   <!-- 投资建议（置顶） -->
   <div class="rec-box" style="border-color:{rec_color};background:{rec_color}18">
     <div style="font-size:18px;font-weight:700;color:{rec_color};margin-bottom:6px">{rec}</div>
-    <div style="font-size:14px;color:#374151">
+    <div style="font-size:14px;color:#374151;line-height:2">
       综合 YC 评分：<strong style="font-size:20px;color:#0f3460">{yc_score_100 if yc_score_100 else 'N/A'}</strong> / 100
       &nbsp;·&nbsp; 等级：{grade_badge(score.grade) if score else '—'}
-      &nbsp;·&nbsp; 建议介入时机：{timing}
+      &nbsp;·&nbsp; <span style="white-space:nowrap">建议介入时机：{timing}</span>
     </div>
     {bd_section_html}
   </div>
@@ -2370,7 +2380,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
   <!-- 1. 项目概况 -->
   <div class="card">
     <h2>📋 项目概况</h2>
-    <table><tbody>{overview_html}</tbody></table>
+    <div class="tbl-wrap"><table><tbody>{overview_html}</tbody></table></div>
   </div>
 
   <!-- 2. 公司/组织背景 -->
@@ -2394,10 +2404,10 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
       <h2 style="margin:0;flex:1">💰 商业模式 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Business Model</span></h2>
       {grade_badge(s2g(score.monetization_score if score else None))}
     </div>
-    <table>
+    <div class="tbl-wrap"><table>
       <thead><tr><th>变现方式</th><th>可行性</th><th>说明</th></tr></thead>
       <tbody>{biz_table_rows}</tbody>
-    </table>
+    </table></div>
     <div style="margin-top:10px;font-size:12px;color:#64748b">推荐销售动力：{_motion_desc_zh}</div>
   </div>
 
@@ -2410,19 +2420,19 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
   <!-- 9. Risk Assessment -->
   <div class="card">
     <h2>⚠️ 风险评估 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Risk Assessment</span></h2>
-    <table>
+    <div class="tbl-wrap"><table>
       <thead><tr><th>风险类型</th><th>等级</th><th>描述</th></tr></thead>
       <tbody>{risk_rows_html}</tbody>
-    </table>
+    </table></div>
   </div>
 
   <!-- 10. YC 综合评分 -->
   <div class="card">
     <h2>🎯 YC 综合评分</h2>
-    <table>
+    <div class="tbl-wrap"><table>
       <thead><tr><th>维度</th><th>权重</th><th>评级</th><th>得分</th></tr></thead>
       <tbody>{yc_score_rows}{yc_total_row}</tbody>
-    </table>
+    </table></div>
   </div>
 
   <!-- 11. 建议行动 -->
