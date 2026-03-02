@@ -555,6 +555,12 @@ window.startAnalysis = function(rowIdx) {
 };
 
 window.generateReport = async function(projectId) {
+  // Open a blank window immediately (sync, inside click handler) to avoid popup blocking.
+  // After the async work completes we navigate it to the real URL.
+  const reportWin = window.open('', '_blank');
+  if (reportWin) {
+    reportWin.document.write('<p style="font-family:sans-serif;padding:40px;color:#64748b">正在生成报告，请稍候…</p>');
+  }
   setStatus('正在生成报告…', 'info');
   try {
     const r = await apiFetch(`${API}/reports:generate`, {
@@ -562,12 +568,19 @@ window.generateReport = async function(projectId) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ project_id: projectId, format: 'html', latest: true }),
     });
-    if (!r.ok) { setStatus('报告生成失败', 'error'); setTimeout(clearStatus, 3000); return; }
+    if (!r.ok) {
+      if (reportWin) reportWin.close();
+      setStatus('报告生成失败', 'error'); setTimeout(clearStatus, 3000); return;
+    }
     const { job_id, url } = await r.json();
     if (job_id) await pollJob(job_id);
     clearStatus();
-    if (url) window.open(url, '_blank');
+    if (url) {
+      if (reportWin) reportWin.location.href = url;
+      else window.open(url, '_blank');
+    }
   } catch (err) {
+    if (reportWin) reportWin.close();
     setStatus(`报告生成失败: ${err.message}`, 'error');
     setTimeout(clearStatus, 3000);
   }
