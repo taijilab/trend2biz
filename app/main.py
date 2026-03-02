@@ -65,6 +65,7 @@ from app.schemas import (
     WatchlistResp,
 )
 from app.services.biz import infer_biz_profile
+from app.services.company_research import research_org
 from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_readme, fetch_repo_metrics, fetch_star_history
 from app.services.scoring import compute_score
 from app.services.trending import TrendingParseError, fetch_trending_html, parse_trending_html
@@ -1527,6 +1528,30 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     biz   = latest_biz(db, project.project_id)
     expl  = (biz.explanations or {}) if biz else {}
 
+    # ── auto-research org company info ────────────────────────────────────────
+    _proj_owner_type  = project.owner_type  or ""
+    _proj_owner_login = project.owner_login or (
+        project.repo_full_name.split("/")[0] if "/" in project.repo_full_name else ""
+    )
+    _needs_research = (
+        _proj_owner_type == "Organization"
+        and not expl.get("company_info", {}).get("website")
+    )
+    if _needs_research and _proj_owner_login:
+        try:
+            _new_expl = research_org(
+                _proj_owner_login,
+                github_token=_effective_github_token(),
+                existing_expl=expl,
+            )
+            if _new_expl != expl:
+                expl = _new_expl
+                if biz:
+                    biz.explanations = expl
+                    db.commit()
+        except Exception as _re:
+            logger.warning("company_research failed for %s: %s", _proj_owner_login, _re)
+
     # ── metrics ──────────────────────────────────────────────────────────────
     metrics_rows = db.execute(
         select(RepoMetricDaily)
@@ -2453,6 +2478,46 @@ def get_report_markdown(report_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Markdown not found in report")
     md_bytes = base64.b64decode(m.group(1))
     return Response(content=md_bytes, media_type="text/markdown; charset=utf-8")
+
+
+@app.post(f"{settings.api_prefix}/projects/{{project_id}}/research-company")
+def trigger_company_research(project_id: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """
+    Manually trigger company background research for an Organization project.
+    Fetches GitHub org info, scrapes official website, searches news for funding.
+    Results are saved to biz.explanations and returned immediately.
+    """
+    project = db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="project not found")
+    if project.owner_type != "Organization":
+        return {"message": "only Organization projects support company research", "skipped": True}
+
+    owner_login = project.owner_login or (
+        project.repo_full_name.split("/")[0] if "/" in project.repo_full_name else ""
+    )
+    if not owner_login:
+        raise HTTPException(status_code=400, detail="owner_login unknown — refresh metrics first")
+
+    biz  = latest_biz(db, project_id)
+    expl = (biz.explanations or {}) if biz else {}
+
+    new_expl = research_org(owner_login, github_token=_effective_github_token(), existing_expl=expl)
+
+    if biz and new_expl != expl:
+        biz.explanations = new_expl
+        db.commit()
+
+    return {
+        "project_id": project_id,
+        "org_login":  owner_login,
+        "company_info":         new_expl.get("company_info", {}),
+        "funding_rounds":       new_expl.get("funding_rounds", []),
+        "revenue_info":         new_expl.get("revenue_info", {}),
+        "commercial_landscape": new_expl.get("commercial_landscape", ""),
+        "strategic_updates":    new_expl.get("strategic_updates", ""),
+        "saved": biz is not None,
+    }
 
 
 @app.get(f"{settings.api_prefix}/projects/search")
