@@ -1003,6 +1003,7 @@ document.addEventListener('click', e => {
 const JOB_TYPE_LABEL = {
   trending_fetch:  '抓取 Trending',
   metrics_refresh: '刷新指标',
+  metrics_backfill:'补全星标历史',
   biz_generate:    'AI 分析',
   score_batch:     '批量评分',
 };
