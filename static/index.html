@@ -18,6 +18,37 @@
         <input type="search" id="search-input" class="search-input" placeholder="搜索项目/赛道…" autocomplete="off">
         <button id="btn-search" class="search-btn" title="搜索">&#128269;</button>
         <button id="btn-search-clear" class="search-clear-btn" title="清除搜索">&#10005;</button>
+        <button id="btn-adv-toggle" class="adv-toggle-btn" title="高级筛选">高级 &#9660;</button>
+      </div>
+      <!-- Advanced filter panel -->
+      <div id="adv-panel" class="adv-panel" style="display:none">
+        <select id="adv-grade" class="adv-select" title="评级筛选">
+          <option value="">全部评级</option>
+          <option value="S">S 级</option>
+          <option value="A">A 级</option>
+          <option value="B">B 级</option>
+          <option value="C">C 级</option>
+        </select>
+        <select id="adv-category" class="adv-select" title="赛道筛选">
+          <option value="">全部赛道</option>
+          <option value="agent">Agent</option>
+          <option value="security">Security</option>
+          <option value="data-platform">Data Platform</option>
+          <option value="observability">Observability</option>
+          <option value="fintech">Fintech</option>
+          <option value="biotech">Biotech</option>
+          <option value="robotics-iot">Robotics / IoT</option>
+          <option value="edu-tech">Edu Tech</option>
+          <option value="media-tech">Media Tech</option>
+          <option value="low-code">Low Code</option>
+          <option value="enterprise-saas">Enterprise SaaS</option>
+          <option value="infra">Infra</option>
+          <option value="devops">DevOps</option>
+          <option value="devtools">DevTools</option>
+          <option value="developer-tools">Developer Tools</option>
+        </select>
+        <input type="number" id="adv-min-stars" class="adv-input" placeholder="最低 Stars" min="0" step="100">
+        <button id="btn-adv-search" class="adv-search-btn">&#128269; 筛选</button>
       </div>
       <a href="/docs" target="_blank" class="api-link">API Docs</a>
       <button id="btn-jobs" class="settings-icon-btn" title="后台任务" style="margin-right:4px">&#128197;</button>

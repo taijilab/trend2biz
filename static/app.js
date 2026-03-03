@@ -162,13 +162,25 @@ function showFreshness(capturedAtIso) {
   el.className = cls;
 }
 
-async function doSearch(q) {
-  if (!q || !q.trim()) return;
+async function doSearch(q, opts) {
+  opts = opts || {};
+  const advGrade    = opts.grade    || (document.getElementById('adv-grade')    ? document.getElementById('adv-grade').value    : '');
+  const advCategory = opts.category || (document.getElementById('adv-category') ? document.getElementById('adv-category').value : '');
+  const advMinStars = opts.min_stars !== undefined ? opts.min_stars : (document.getElementById('adv-min-stars') ? parseInt(document.getElementById('adv-min-stars').value, 10) || 0 : 0);
+  const hasFilter   = advGrade || advCategory || advMinStars > 0;
+
+  // Require either keyword or at least one filter
+  if (!q && !hasFilter) return;
   currentView = 'search';
   const content = document.getElementById('content');
   content.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>搜索中...</span></div>';
   try {
-    const res = await apiFetch(`${API}/projects/search?${new URLSearchParams({ q, limit: 30 })}`);
+    const params = { limit: 50 };
+    if (q) params.q = q;
+    if (advGrade)    params.grade = advGrade;
+    if (advCategory) params.category = advCategory;
+    if (advMinStars > 0) params.min_stars = advMinStars;
+    const res = await apiFetch(`${API}/projects/search?${new URLSearchParams(params)}`);
     if (!res.ok) throw new Error(`Search error: ${res.status}`);
     const data = await res.json();
     searchResults = (data.items || []).map(p => ({
@@ -185,7 +197,11 @@ async function doSearch(q) {
     }));
     tableRows = searchResults;
     renderTable();
-    document.getElementById('footer-info').textContent = `搜索 "${q}" · ${searchResults.length} 个结果`;
+    let label = q ? `搜索 "${q}"` : '高级筛选';
+    if (advGrade)    label += ` · 评级:${advGrade}`;
+    if (advCategory) label += ` · 赛道:${advCategory}`;
+    if (advMinStars > 0) label += ` · Stars≥${advMinStars}`;
+    document.getElementById('footer-info').textContent = `${label} · ${searchResults.length} 个结果`;
   } catch (e) {
     content.innerHTML = `<div class="empty-state"><h3>搜索失败</h3><p>${escHtml(e.message)}</p></div>`;
   }
@@ -787,6 +803,28 @@ function init() {
   if (searchClear) searchClear.addEventListener('click', () => {
     if (searchInput) searchInput.value = '';
     if (currentView === 'search') { currentView = 'trending'; tableRows = []; renderTable(); loadDashboard(currentDate, currentSince); }
+  });
+
+  // Advanced filter panel toggle
+  const advToggleBtn = document.getElementById('btn-adv-toggle');
+  const advPanel = document.getElementById('adv-panel');
+  if (advToggleBtn && advPanel) {
+    advToggleBtn.addEventListener('click', () => {
+      const visible = advPanel.style.display !== 'none';
+      advPanel.style.display = visible ? 'none' : 'flex';
+      advToggleBtn.textContent = visible ? '高级 ▾' : '高级 ▴';
+    });
+  }
+  const advSearchBtn = document.getElementById('btn-adv-search');
+  if (advSearchBtn) {
+    advSearchBtn.addEventListener('click', () => {
+      doSearch(searchInput ? searchInput.value.trim() : '');
+    });
+  }
+  // Auto-trigger search when advanced filter selects change
+  ['adv-grade', 'adv-category'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => doSearch(searchInput ? searchInput.value.trim() : ''));
   });
 
   // Export dropdown
