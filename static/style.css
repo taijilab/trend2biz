@@ -1203,11 +1203,14 @@ footer {
 .adv-toggle-btn:hover { color: var(--text); border-color: var(--accent); }
 
 /* Advanced search panel — appears below header-right */
-.header-right { position: relative; flex-direction: column; align-items: flex-end; gap: 4px; }
+.header-right {
+  display: flex; flex-direction: row; flex-wrap: wrap;
+  align-items: center; gap: 8px; justify-content: flex-end;
+}
 .adv-panel {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   padding: 6px 8px; background: var(--surface2); border: 1px solid var(--border);
-  border-radius: 6px; margin-top: 2px;
+  border-radius: 6px; flex-basis: 100%; /* force to new row */
 }
 .adv-select, .adv-input {
   padding: 4px 7px; border-radius: 5px; font-size: 12px;
