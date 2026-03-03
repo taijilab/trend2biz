@@ -59,6 +59,8 @@ def fetch_repo_metrics(repo_full_name: str, token: Optional[str] = None) -> dict
     contributors_90d = None
     commits_30d = None
     commits_90d = None
+    bus_factor_top1_share = None
+    top_maintainers_90d: list[dict] = []
 
     for attempt in range(3):
         contrib_resp = httpx.get(pushes_url, timeout=20.0, headers=headers)
@@ -73,25 +75,45 @@ def fetch_repo_metrics(repo_full_name: str, token: Optional[str] = None) -> dict
             active = 0
             c30 = 0
             c90 = 0
+            contrib_90d_by_user: list[tuple[str, int]] = []
             for contributor in contributors:
                 weeks = contributor.get("weeks", [])
                 weeks_sorted = [w for w in weeks if "w" in w and "c" in w]
+                c90_user = 0
                 for w in weeks_sorted:
                     week_ts = datetime.fromtimestamp(w["w"], tz=timezone.utc)
                     delta_days = (now - week_ts).days
                     if delta_days <= 30:
                         c30 += int(w.get("c", 0))
                     if delta_days <= 90:
-                        c90 += int(w.get("c", 0))
+                        wc = int(w.get("c", 0))
+                        c90 += wc
+                        c90_user += wc
                 if any(
                     (now - datetime.fromtimestamp(w.get("w", 0), tz=timezone.utc)).days <= 90
                     and w.get("c", 0) > 0
                     for w in weeks_sorted
                 ):
                     active += 1
+                if c90_user > 0:
+                    author = contributor.get("author") or {}
+                    login = author.get("login") or "unknown"
+                    contrib_90d_by_user.append((login, c90_user))
             contributors_90d = active
             commits_30d = c30
             commits_90d = c90
+            if c90 > 0 and contrib_90d_by_user:
+                contrib_90d_by_user.sort(key=lambda x: x[1], reverse=True)
+                bus_factor_top1_share = contrib_90d_by_user[0][1] / c90
+                top_maintainers_90d = [
+                    {
+                        "login": login,
+                        "commits_90d": commits,
+                        "share_90d": round(commits / c90, 4),
+                        "profile_url": f"https://github.com/{login}" if login != "unknown" else "",
+                    }
+                    for login, commits in contrib_90d_by_user[:5]
+                ]
         break  # Non-202 response (success or error) — stop retrying
 
     owner = data.get("owner") or {}
@@ -103,6 +125,8 @@ def fetch_repo_metrics(repo_full_name: str, token: Optional[str] = None) -> dict
         "commits_30d": commits_30d,
         "commits_90d": commits_90d,
         "contributors_90d": contributors_90d,
+        "bus_factor_top1_share": bus_factor_top1_share,
+        "top_maintainers_90d": top_maintainers_90d,
         "license_spdx": (data.get("license") or {}).get("spdx_id"),
         "description": data.get("description"),
         "primary_language": data.get("language"),

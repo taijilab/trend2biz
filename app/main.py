@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Req
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, desc, func, or_, select, text
+from sqlalchemy import and_, desc, func, inspect, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -201,17 +201,26 @@ if _STATIC_DIR.is_dir():
 
 def _migrate_add_missing_columns() -> None:
     """Idempotent column migrations for databases created before schema additions."""
+    try:
+        jobs_cols = {c["name"] for c in inspect(engine).get_columns("jobs")}
+        projects_cols = {c["name"] for c in inspect(engine).get_columns("projects")}
+    except Exception as exc:
+        logger.warning("migration skipped (inspect tables): %s", exc)
+        return
+
     migrations = [
-        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 3",
-        "ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_login VARCHAR(255)",
-        "ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_type VARCHAR(50)",
+        ("jobs", "retry_count", "ALTER TABLE jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"),
+        ("jobs", "max_retries", "ALTER TABLE jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3"),
+        ("projects", "owner_login", "ALTER TABLE projects ADD COLUMN owner_login VARCHAR(255)"),
+        ("projects", "owner_type", "ALTER TABLE projects ADD COLUMN owner_type VARCHAR(50)"),
     ]
-    with engine.connect() as conn:
-        for sql in migrations:
+    with engine.begin() as conn:
+        for table_name, col_name, sql in migrations:
+            table_cols = jobs_cols if table_name == "jobs" else projects_cols
+            if col_name in table_cols:
+                continue
             try:
                 conn.execute(text(sql))
-                conn.commit()
                 logger.info("migration ok: %s", sql[:60])
             except Exception as exc:
                 logger.warning("migration skipped (%s): %s", sql[:60], exc)
@@ -399,6 +408,50 @@ def refresh_metrics_for_project(db: Session, project: Project, metric_date: date
     metric.commits_30d = data.get("commits_30d")
     metric.commits_90d = data.get("commits_90d")
     metric.contributors_90d = data.get("contributors_90d")
+    metric.bus_factor_top1_share = data.get("bus_factor_top1_share")
+    metric.captured_at = datetime.utcnow()
+
+    # Cache top maintainers in latest biz explanation for report rendering.
+    top_maintainers = data.get("top_maintainers_90d") or []
+    if top_maintainers:
+        lb = latest_biz(db, project.project_id)
+        if lb:
+            expl = dict(lb.explanations or {})
+            expl["maintainers_90d"] = top_maintainers
+            lb.explanations = expl
+    db.flush()
+    return metric
+
+
+def _fallback_metric_from_snapshot_hint(db: Session, project_id: str, metric_date: date) -> Optional[RepoMetricDaily]:
+    """Create/update today's metric from latest snapshot hints when GitHub API is unavailable."""
+    snap_item = db.execute(
+        select(TrendingSnapshotItem)
+        .join(TrendingSnapshot, TrendingSnapshotItem.snapshot_id == TrendingSnapshot.snapshot_id)
+        .where(
+            TrendingSnapshotItem.project_id == project_id,
+            or_(
+                TrendingSnapshotItem.stars_total_hint.isnot(None),
+                TrendingSnapshotItem.forks_total_hint.isnot(None),
+            ),
+        )
+        .order_by(desc(TrendingSnapshot.snapshot_date))
+        .limit(1)
+    ).scalar_one_or_none()
+    if not snap_item:
+        return None
+
+    metric = db.execute(
+        select(RepoMetricDaily).where(and_(RepoMetricDaily.project_id == project_id, RepoMetricDaily.metric_date == metric_date))
+    ).scalar_one_or_none()
+    if not metric:
+        metric = RepoMetricDaily(project_id=project_id, metric_date=metric_date)
+        db.add(metric)
+
+    if snap_item.stars_total_hint is not None:
+        metric.stars = snap_item.stars_total_hint
+    if snap_item.forks_total_hint is not None:
+        metric.forks = snap_item.forks_total_hint
     metric.captured_at = datetime.utcnow()
     db.flush()
     return metric
@@ -509,6 +562,66 @@ def _translate_to_zh_mymemory(text: str) -> Optional[str]:
         return result if result else None
     except Exception:
         return None
+
+
+def _contains_zh(text: str) -> bool:
+    return any("\u4e00" <= c <= "\u9fff" for c in text)
+
+
+def _parse_news_markdown_items(raw: str) -> list[dict]:
+    """Parse markdown-ish news block into [{title,url,snippet}] items."""
+    items: list[dict] = []
+    if not raw:
+        return items
+
+    blocks = [b.strip() for b in re.split(r"\n\s*\n+", raw) if b.strip()]
+    for block in blocks:
+        line = " ".join(x.strip() for x in block.splitlines() if x.strip())
+        line = line.lstrip("-• ").strip()
+        line = line.replace("**", "").strip()
+
+        m = re.search(r"\[([^\]]+)\]\((https?://[^)]+)\)", line)
+        if m:
+            title = m.group(1).strip()
+            url = m.group(2).strip()
+            snippet = line[m.end():].strip()
+            snippet = re.sub(r"^[—\-:：\s]+", "", snippet).strip()
+            items.append({"title": title, "url": url, "snippet": snippet})
+            continue
+
+        # Fallback: keep plain text block when no markdown link is present.
+        items.append({"title": line[:120], "url": "", "snippet": line})
+
+    return items[:6]
+
+
+def _translate_news_items_to_zh(items: list[dict]) -> list[dict]:
+    """Best-effort Chinese translation for title/snippet while preserving links."""
+    cache: dict[str, str] = {}
+
+    def tr(text: str, max_chars: int) -> str:
+        src = (text or "").strip()
+        if not src:
+            return ""
+        if _contains_zh(src):
+            return src
+        key = src[:max_chars]
+        if key in cache:
+            return cache[key]
+        out = _translate_to_zh_mymemory(key)
+        cache[key] = out.strip() if out else src
+        return cache[key]
+
+    out_items: list[dict] = []
+    for it in items:
+        out_items.append({
+            "title": it.get("title", ""),
+            "url": it.get("url", ""),
+            "snippet": it.get("snippet", ""),
+            "title_zh": tr(it.get("title", ""), 180),
+            "snippet_zh": tr(it.get("snippet", ""), 450),
+        })
+    return out_items
 
 
 def enrich_description_zh(
@@ -844,7 +957,26 @@ def _do_metrics_refresh(db: Session, project_id: str, metric_date: date) -> None
     project = db.get(Project, project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
-    refresh_metrics_for_project(db, project, metric_date)
+    try:
+        refresh_metrics_for_project(db, project, metric_date)
+    except RateLimitError as exc:
+        # Graceful degradation: keep analysis flow alive under GitHub API throttling.
+        metric = latest_metric(db, project_id)
+        if metric:
+            logger.warning("metrics refresh rate-limited for %s, using latest metric %s", project.repo_full_name, metric.metric_date)
+            return
+        fallback = _fallback_metric_from_snapshot_hint(db, project_id, metric_date)
+        if fallback:
+            logger.warning("metrics refresh rate-limited for %s, using snapshot-hint fallback", project.repo_full_name)
+            return
+        raise exc
+
+
+def _do_metrics_backfill(db: Session, project_id: str, metric_date: date) -> None:
+    """Heavy metrics enrichment (non-blocking for interactive analyze flow)."""
+    project = db.get(Project, project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
 
     # Backfill star history from GitHub Stargazers API (star-history.com technique).
     # Run when we lack records older than 7 days — indicates no full history yet.
@@ -994,6 +1126,10 @@ def run_snapshot_fetch_job(job_id: str, since: str, language: str, spoken: Optio
 
 def run_metrics_refresh_job(job_id: str, project_id: str, metric_date: date) -> None:
     _run_job_with_retry(job_id, _do_metrics_refresh, project_id, metric_date)
+
+
+def run_metrics_backfill_job(job_id: str, project_id: str, metric_date: date) -> None:
+    _run_job_with_retry(job_id, _do_metrics_backfill, project_id, metric_date)
 
 
 def run_biz_generate_job(job_id: str, project_id: str, model: str, api_key: Optional[str] = None, provider: Optional[str] = None) -> None:
@@ -1451,8 +1587,12 @@ def refresh_project_metrics(project_id: str, background_tasks: BackgroundTasks, 
         raise HTTPException(status_code=404, detail="project not found")
 
     job = create_job(db, "metrics_refresh", {"project_id": project_id})
+    # Non-blocking heavy enrichment job: does star-history backfill after quick refresh.
+    backfill_job = create_job(db, "metrics_backfill", {"project_id": project_id})
+    backfill_job.max_retries = 1
     db.commit()
     background_tasks.add_task(run_metrics_refresh_job, job.job_id, project_id, date.today())
+    background_tasks.add_task(run_metrics_backfill_job, backfill_job.job_id, project_id, date.today())
     return JobResp(job_id=job.job_id, status=job.status)
 
 
@@ -1578,6 +1718,32 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     cur_commits = latest_m.commits_30d      if latest_m else None
     cur_contribs= latest_m.contributors_90d if latest_m else None
     bus_factor  = latest_m.bus_factor_top1_share if latest_m else None
+
+    # ── maintainers (专项) ───────────────────────────────────────────────────
+    maintainers_90d = list((expl.get("maintainers_90d") or []) if isinstance(expl, dict) else [])
+    if not maintainers_90d:
+        try:
+            _m = fetch_repo_metrics(project.repo_full_name, token=_effective_github_token())
+            maintainers_90d = _m.get("top_maintainers_90d") or []
+            if _m.get("bus_factor_top1_share") is not None and latest_m:
+                latest_m.bus_factor_top1_share = _m.get("bus_factor_top1_share")
+                bus_factor = latest_m.bus_factor_top1_share
+            if maintainers_90d and biz:
+                _new_expl = dict(expl)
+                _new_expl["maintainers_90d"] = maintainers_90d
+                biz.explanations = _new_expl
+                expl = _new_expl
+                db.commit()
+        except Exception as _mexc:
+            logger.warning("maintainer fetch failed for %s: %s", project.repo_full_name, _mexc)
+
+    maintainer_top1 = maintainers_90d[0] if maintainers_90d else None
+    maintainer_top1_share = (
+        maintainer_top1.get("share_90d")
+        if maintainer_top1 and isinstance(maintainer_top1.get("share_90d"), (int, float))
+        else bus_factor
+    )
+    maintainer_share = maintainer_top1_share if isinstance(maintainer_top1_share, (int, float)) else bus_factor
 
     # ── star history ─────────────────────────────────────────────────────────
     star_dates: list[str] = []
@@ -1727,11 +1893,11 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         ("Open Issues", fmt_num(cur_issues)),
         ("贡献者 (90d)", fmt_num(cur_contribs)),
         ("Commits (30d)", fmt_num(cur_commits)),
-        ("主维护者集中度", f"{bus_factor:.0%}" if bus_factor else "—"),
+        ("主维护者集中度", f"{maintainer_share:.0%}" if maintainer_share is not None else "—"),
         ("商业赛道", biz.category if biz else "—"),
         ("变现形式", "、".join(biz.monetization_candidates or []) if biz else "—"),
         ("销售动力", biz.sales_motion if biz else "—"),
-        ("License", _license_badge(expl.get("license") or "")),
+        ("License", _license_badge(project.license_spdx or expl.get("license") or "")),
     ]
     overview_html = "".join(
         f'<tr><td style="color:#64748b;width:130px;padding:6px 8px;vertical-align:top;font-size:13px">{k}</td>'
@@ -1814,7 +1980,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         f"Fork/Star 比：{fork_rate}（高说明开发者真正在用）",
         f"近 90 天活跃贡献者：{fmt_num(cur_contribs)}",
         f"近 30 天 Commits：{fmt_num(cur_commits)}",
-        f"主维护者集中度：{'高（单点风险）' if bus_factor and bus_factor > 0.5 else '较分散（健康）' if bus_factor else '—'}",
+        f"主维护者集中度：{'高（单点风险）' if maintainer_share and maintainer_share > 0.5 else '较分散（健康）' if maintainer_share else '—'}",
     ] + (score.highlights or [])[:3]
 
     # ── section: problem & market ────────────────────────────────────────────
@@ -1879,20 +2045,59 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     team_bullets = [
         _owner_label,
         f"近 90 天贡献者数：{fmt_num(cur_contribs)}",
-        f"主维护者集中度：{pct(bus_factor)}（>50% 表示单点风险）" if bus_factor else "主维护者集中度：数据待采集",
+        f"主维护者集中度：{pct(maintainer_share)}（>50% 表示单点风险）" if maintainer_share else "主维护者集中度：数据待采集",
         f"团队健康度：{_team_health}",
         f"销售动力评估：{_motion_desc_zh}",
     ]
+
+    # ── section: maintainer deep dive ───────────────────────────────────────
+    maintainer_section_html = ""
+    maintainer_md_rows: list[tuple[str, str, str, str]] = []
+    maintainer_note = ""
+    if maintainers_90d:
+        m_rows_html = ""
+        for idx, m in enumerate(maintainers_90d[:5], start=1):
+            login = m.get("login") or "unknown"
+            commits_90d = int(m.get("commits_90d") or 0)
+            share = m.get("share_90d")
+            share_txt = f"{share:.1%}" if isinstance(share, (int, float)) else "—"
+            profile_url = m.get("profile_url") or (f"https://github.com/{login}" if login != "unknown" else "")
+            login_html = f'<a href="{profile_url}" target="_blank" rel="noopener" style="color:#0f3460">{login}</a>' if profile_url else login
+            m_rows_html += f"<tr><td>{idx}</td><td>{login_html}</td><td>{commits_90d}</td><td>{share_txt}</td></tr>"
+            maintainer_md_rows.append((str(idx), f"[{login}]({profile_url})" if profile_url else login, str(commits_90d), share_txt))
+
+        maintainer_note = (
+            "单点风险高，建议扩大核心维护者梯队并引入更多 reviewer。"
+            if maintainer_top1_share and maintainer_top1_share >= 0.5 else
+            "维护者贡献相对分散，团队韧性较好。"
+        )
+        maintainer_section_html = f"""
+        <div class="card">
+          <h2>🧑‍💻 主维护者专项 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Maintainer Concentration (90d)</span></h2>
+          <div class="tbl-wrap"><table>
+            <thead><tr><th>排名</th><th>维护者</th><th>90d Commits</th><th>贡献占比</th></tr></thead>
+            <tbody>{m_rows_html}</tbody>
+          </table></div>
+          <div style="margin-top:10px;font-size:12px;color:#64748b">专项说明：{maintainer_note}</div>
+        </div>"""
+    else:
+        maintainer_section_html = (
+            '<div class="card"><h2>🧑‍💻 主维护者专项 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">'
+            'Maintainer Concentration (90d)</span></h2>'
+            '<p style="font-size:13px;color:#94a3b8">⚠️ 暂未抓取到主维护者贡献明细。请先执行一次「分析」或「刷新指标」后重试。</p>'
+            '</div>'
+        )
 
     # ── section: 公司/组织背景 ─────────────────────────────────────────────────
     company_section_html = ""
     company_md_lines: list = []
     if _otype == "Organization":
+        import html as _html
         _ci        = expl.get("company_info") or {}
         _funding   = expl.get("funding_rounds") or []
         _revenue   = expl.get("revenue_info") or {}
         _comm_land = expl.get("commercial_landscape") or ""
-        _strategic = expl.get("strategic_updates") or ""
+        _strategic_raw = expl.get("strategic_updates") or ""
         _cp_risks  = expl.get("company_project_risk") or []
 
         def _ci_val(key, default="⚠️ 待调研"):
@@ -1922,12 +2127,17 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             _fund_rows = "".join(
                 f'<tr><td>{r.get("round","—")}</td><td>{r.get("amount","—")}</td>'
                 f'<td>{r.get("date","—")}</td>'
-                f'<td style="color:#64748b;font-size:12px">{r.get("investors","—")}</td></tr>'
+                f'<td style="color:#64748b;font-size:12px">{r.get("investors","—")}</td>'
+                + (
+                    f'<td style="font-size:12px"><a href="{r.get("source")}" target="_blank" rel="noopener" style="color:#0f3460">来源</a></td></tr>'
+                    if r.get("source")
+                    else '<td style="color:#94a3b8;font-size:12px">—</td></tr>'
+                )
                 for r in _funding[:6]
             )
             _fund_section = (
                 _h3 + '融资历史</h3>'
-                '<div class="tbl-wrap"><table><thead><tr><th>轮次</th><th>金额</th><th>时间</th><th>投资方</th></tr></thead>'
+                '<div class="tbl-wrap"><table><thead><tr><th>轮次</th><th>金额</th><th>时间</th><th>投资方</th><th>来源</th></tr></thead>'
                 f'<tbody>{_fund_rows}</tbody></table></div>'
             )
         else:
@@ -1955,11 +2165,26 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             if _comm_land else
             '<p style="color:#94a3b8;font-size:13px">⚠️ 待调研 — 可通过 /yc-oss-investment-analysis skill 补充</p>'
         )
-        _strat_html = (
-            f'<p style="font-size:13px;color:#374151;line-height:1.6;margin:8px 0">{_strategic}</p>'
-            if _strategic else
-            '<p style="color:#94a3b8;font-size:13px">⚠️ 待调研</p>'
-        )
+        _strat_items = _translate_news_items_to_zh(_parse_news_markdown_items(_strategic_raw))
+        if _strat_items:
+            _rows = ""
+            for it in _strat_items:
+                _title = _html.escape(it.get("title_zh") or it.get("title") or "未命名动态")
+                _url = (it.get("url") or "").strip()
+                _snip = _html.escape(it.get("snippet_zh") or it.get("snippet") or "")
+                _title_html = (
+                    f'<a href="{_url}" target="_blank" rel="noopener" style="color:#0f3460;text-decoration:none;font-weight:600">{_title}</a>'
+                    if _url else _title
+                )
+                _rows += (
+                    '<li style="font-size:13px;color:#374151;margin-bottom:8px;line-height:1.5">'
+                    f'{_title_html}'
+                    + (f'<div style="margin-top:3px;color:#64748b">{_snip}</div>' if _snip else "")
+                    + '</li>'
+                )
+            _strat_html = f'<ul style="margin:0;padding-left:18px">{_rows}</ul>'
+        else:
+            _strat_html = '<p style="color:#94a3b8;font-size:13px">⚠️ 待调研</p>'
 
         _default_cp_risks = [
             "商业公司控制 OSS 项目存在 License 变更风险（参考 HashiCorp、Redis 案例）",
@@ -1991,8 +2216,11 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         _fund_md = []
         if _funding:
             _fund_md = (
-                ["| 轮次 | 金额 | 时间 | 投资方 |", "|---|---|---|---|"] +
-                [f"| {r.get('round','—')} | {r.get('amount','—')} | {r.get('date','—')} | {r.get('investors','—')} |"
+                ["| 轮次 | 金额 | 时间 | 投资方 | 来源 |", "|---|---|---|---|---|"] +
+                [
+                    f"| {r.get('round','—')} | {r.get('amount','—')} | {r.get('date','—')} | {r.get('investors','—')} | "
+                    + (f"[来源]({r.get('source')})" if r.get("source") else "—")
+                    + " |"
                  for r in _funding[:6]] + [""]
             )
         else:
@@ -2018,8 +2246,11 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
              f"| 知名客户 | {_revenue.get('notable_clients') or '⚠️ 未公开'} |",
              "", "### 商业版图", "",
              _comm_land or "⚠️ 待调研 — 可通过 /yc-oss-investment-analysis skill 补充",
-             "", "### 战略动态", "",
-             _strategic or "⚠️ 待调研",
+             "", "### 战略动态", ""] +
+            ([f"- [{(it.get('title_zh') or it.get('title') or '未命名动态')}]({it.get('url')})"
+              + (f"：{(it.get('snippet_zh') or it.get('snippet') or '')}" if (it.get("snippet_zh") or it.get("snippet")) else "")
+              for it in _strat_items] if _strat_items else ["⚠️ 待调研"]) +
+            [
              "", "### 公司 vs 项目风险", ""] +
             [f"- {r}" for r in _cp_items[:5]] +
             ["", "> 💡 通过 `/yc-oss-investment-analysis` skill 可补充完整的公司背景信息", ""]
@@ -2132,15 +2363,15 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
             for r in _llm_risks if isinstance(r, dict)
         ][:5]
     else:
-        _license_spdx = expl.get("license", "") or ""
+        _license_spdx = project.license_spdx or expl.get("license", "") or ""
         _license_lvl = "high" if "AGPL" in _license_spdx.upper() or "BUSL" in _license_spdx.upper() else (
             "medium" if "GPL" in _license_spdx.upper() else "low"
         )
         _risk_cat = [
             ("大厂竞争风险",   "medium", "大型云厂商或开源基金会可能推出竞品"),
             ("License 风险",  _license_lvl, f"当前 License：{_license_spdx or '待确认'}"),
-            ("维护者单点风险", "high" if bus_factor and bus_factor > 0.5 else "low",
-             f"主维护者集中度 {pct(bus_factor)}，{'需引入更多 Contributor' if bus_factor and bus_factor > 0.5 else '贡献分布健康'}"),
+            ("维护者单点风险", "high" if maintainer_share and maintainer_share > 0.5 else "low",
+             f"主维护者集中度 {pct(maintainer_share)}，{'需引入更多 Contributor' if maintainer_share and maintainer_share > 0.5 else '贡献分布健康'}"),
             ("商业化转化风险", "medium", "从 OSS 用户转为付费用户需要明确的企业版价值主张"),
             ("技术过时风险",   "low",    f"主语言 {project.primary_language or '未知'}，{signals.get('moat', '技术细节待评估')}"),
         ]
@@ -2280,6 +2511,13 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     ]
     md_lines += _yc_section_md("团队与社区", "Team & Community",
                                 score.team_score if score else None, team_bullets)
+    md_lines += ["## 主维护者专项 (Maintainer Concentration)", ""]
+    if maintainer_md_rows:
+        md_lines += [_md_table(["排名", "维护者", "90d Commits", "贡献占比"], maintainer_md_rows), ""]
+        if maintainer_note:
+            md_lines += [f"专项说明：{maintainer_note}", ""]
+    else:
+        md_lines += ["⚠️ 暂未抓取到主维护者贡献明细。请先执行一次「分析」或「刷新指标」后重试。", ""]
     md_lines += [
         "## 竞品分析 (Competitive Landscape)", "",
         _md_table(["竞品", "类型", "定位", "对比要点"], _comp_md_rows), "",
@@ -2334,6 +2572,9 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
         (_chk(score is not None and score.team_score is not None),
          "创始团队信息",
          "已评分" if score and score.team_score else "⚠️ 未评分"),
+        (_chk(bool(maintainers_90d)),
+         "主维护者抓取",
+         f"{len(maintainers_90d)} 位维护者（90d）" if maintainers_90d else "⚠️ 未抓取到维护者明细"),
         (_chk(bool(comp_list) and comp_list[0][0] != "（待补充）"),
          "竞品数据",
          f"{len(comp_list)} 个竞品" if comp_list and comp_list[0][0] != "（待补充）" else "⚠️ 使用占位符"),
@@ -2472,10 +2713,13 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
   <!-- 7. Team & Community -->
   {yc_card("Team &amp; Community", "👥 团队与社区", score.team_score if score else None, team_bullets)}
 
-  <!-- 8. Competitive Landscape -->
+  <!-- 8. Maintainer -->
+  {maintainer_section_html}
+
+  <!-- 9. Competitive Landscape -->
   {comp_section_html}
 
-  <!-- 9. Risk Assessment -->
+  <!-- 10. Risk Assessment -->
   <div class="card">
     <h2>⚠️ 风险评估 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">Risk Assessment</span></h2>
     <div class="tbl-wrap"><table>
@@ -2484,7 +2728,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     </table></div>
   </div>
 
-  <!-- 10. YC 综合评分 -->
+  <!-- 11. YC 综合评分 -->
   <div class="card">
     <h2>🎯 YC 综合评分</h2>
     <div class="tbl-wrap"><table>
@@ -2493,7 +2737,7 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     </table></div>
   </div>
 
-  <!-- 11. 建议行动 -->
+  <!-- 12. 建议行动 -->
   <div class="card">
     <h2>💡 建议行动清单</h2>
     <ul style="margin:0;padding-left:18px">{checklist_html}</ul>
