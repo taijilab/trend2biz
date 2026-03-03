@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -40,6 +40,26 @@ def _check_rate_limit(resp: httpx.Response) -> None:
             "GitHub rate limit exhausted",
             reset_at=int(x_reset) if x_reset else None,
         )
+
+
+def _github_search_count(headers: dict, query: str) -> Optional[int]:
+    """Return total_count from GitHub Search Issues API for the given query.
+
+    Returns None on any failure so callers can safely skip.
+    """
+    try:
+        resp = httpx.get(
+            "https://api.github.com/search/issues",
+            params={"q": query, "per_page": 1},
+            timeout=15.0,
+            headers=headers,
+        )
+        _check_rate_limit(resp)
+        if resp.status_code == 200:
+            return resp.json().get("total_count")
+    except Exception:
+        pass
+    return None
 
 
 def fetch_repo_metrics(repo_full_name: str, token: Optional[str] = None) -> dict:
@@ -115,6 +135,11 @@ def fetch_repo_metrics(repo_full_name: str, token: Optional[str] = None) -> dict
                     for login, commits in contrib_90d_by_user[:5]
                 ]
         break  # Non-202 response (success or error) — stop retrying
+
+    # PR / Issue activity in the last 30 days via GitHub Search API
+    since_30d = (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%d")
+    prs_30d = _github_search_count(headers, f"repo:{repo_full_name} is:pr created:>{since_30d}")
+    issues_30d = _github_search_count(headers, f"repo:{repo_full_name} is:issue created:>{since_30d}")
 
     owner = data.get("owner") or {}
     return {

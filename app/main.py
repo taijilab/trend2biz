@@ -67,7 +67,7 @@ from app.schemas import (
 from app.services.biz import infer_biz_profile
 from app.services.company_research import research_org
 from app.services.github_metrics import GithubMetricsError, RateLimitError, fetch_readme, fetch_repo_metrics, fetch_star_history
-from app.services.scoring import compute_score
+from app.services.scoring import compute_score, compute_score_v5
 from app.services.trending import TrendingParseError, fetch_trending_html, parse_trending_html
 
 
@@ -736,7 +736,15 @@ def generate_biz_profile_llm(
         f'  "project_risks": [\n'
         f'    {{"type": "风险类型（中文，8字内）", "level": "high|medium|low", "desc": "结合本项目具体情况描述（30字内）"}},\n'
         f'    {{"type": "风险类型2", "level": "medium", "desc": "描述2"}}\n'
-        f'  ]\n'
+        f'  ],\n'
+        f'  "v5_structural": {{\n'
+        f'    "score": 6.5,\n'
+        f'    "tech_moat": "核心技术壁垒或差异化竞争优势（20字内）",\n'
+        f'    "platform_potential": "平台化或生态扩展潜力（20字内）",\n'
+        f'    "integration_depth": "用户集成深度/锁定强度（20字内）",\n'
+        f'    "rationale": "综合判断，评分依据（30字内）"\n'
+        f'  }},\n'
+        f'  "investment_thesis": "一句话投资核心逻辑：该项目的核心竞争力 + 当前最佳投资时机 + 建议动作（50字内）"\n'
         f'}}'
     )
 
@@ -749,7 +757,7 @@ def generate_biz_profile_llm(
                 json={
                     "model": "deepseek/deepseek-chat-v3-0324:free",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 1500,
+                    "max_tokens": 2000,
                 },
                 timeout=60,
             )
@@ -765,7 +773,7 @@ def generate_biz_profile_llm(
                 json={
                     "model": "glm-4-flash",
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 1500,
+                    "max_tokens": 2000,
                 },
                 timeout=60,
             )
@@ -779,7 +787,7 @@ def generate_biz_profile_llm(
             client = anthropic.Anthropic(api_key=api_key)
             msg = client.messages.create(
                 model="claude-haiku-4-5-20251001",
-                max_tokens=1500,
+                max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = msg.content[0].text.strip() or None
@@ -822,6 +830,8 @@ def generate_biz_profile_llm(
             "bd_pitch": data.get("bd_pitch"),
             "competitors": data.get("competitors") or [],
             "project_risks": data.get("project_risks") or [],
+            "v5_structural": data.get("v5_structural") or None,
+            "investment_thesis": data.get("investment_thesis") or None,
         },
     }
 
@@ -871,12 +881,22 @@ def generate_biz_and_score(
         "contributors_90d": metric.contributors_90d if metric else 0,
         "bus_factor_top1_share": (metric.bus_factor_top1_share if metric else None) or 0.0,
         "license_spdx": (biz_data.get("explanations") or {}).get("license", "") if biz_data else "",
+        "prs_30d": metric.prs_30d if metric else None,
+        "issues_30d": metric.issues_30d if metric else None,
+        "open_issues": metric.open_issues if metric else None,
+        "owner_type": project.owner_type if hasattr(project, "owner_type") else None,
+        "star_history": [],
     }
-    score_data = compute_score(metric_payload, biz_data)
+    if model == "llm-v1":
+        score_data = compute_score_v5(metric_payload, biz_data)
+        score_model = "v5-decision-engine"
+    else:
+        score_data = compute_score(metric_payload, biz_data)
+        score_model = "yc-open-source-v1"
     score = upsert_score(
         db=db,
         project=project,
-        model="yc-open-source-v1",
+        model=score_model,
         biz_id=biz.biz_profile_id,
         metric_date=metric.metric_date if metric else None,
         score_data=score_data,
@@ -2427,6 +2447,118 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     )
     bd_section_html = f'<div style="margin-top:10px;background:#fefce8;border-left:3px solid #f59e0b;padding:10px 14px;border-radius:6px;font-size:13px;line-height:1.7">{bd_pitch}</div>' if bd_pitch else ""
 
+    # ── v5 Decision Engine sections ───────────────────────────────────────────
+    _is_v5 = bool(score and score.model_name == "v5-decision-engine")
+    _v5_expl = (score.explanations or {}) if score else {}
+    _investment_thesis = expl.get("investment_thesis") or None
+    _stage = _v5_expl.get("stage") or ""
+    _investment_window = _v5_expl.get("investment_window") or ""
+    _maintainer_risk = _v5_expl.get("maintainer_risk") or {}
+    _v5_struct_detail = expl.get("v5_structural") or {}
+    _health_score = _v5_expl.get("health_score")
+    _commercial_score = _v5_expl.get("commercial_score")
+    _structural_score = _v5_expl.get("structural_score")
+    _momentum_score = _v5_expl.get("momentum_score")
+    _v5_signals_text = _v5_expl.get("signals_text") or {}
+
+    def _risk_badge(level: str) -> str:
+        cfg = {
+            "high":   ("#fee2e2", "#dc2626", "高"),
+            "medium": ("#fef9c3", "#b45309", "中"),
+            "low":    ("#dcfce7", "#16a34a", "低"),
+        }
+        bg, fg, label = cfg.get(level, ("#f1f5f9", "#64748b", level or "—"))
+        return f'<span style="display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600;background:{bg};color:{fg}">{label}</span>'
+
+    def _score_bar(val, label: str, subtitle: str = "") -> str:
+        if val is None:
+            return f'<div style="margin-bottom:8px"><span style="font-size:12px;color:#64748b">{label}: —</span></div>'
+        pct_val = min(100, max(0, int(float(val) / 10 * 100)))
+        color = "#22c55e" if float(val) >= 7 else "#f59e0b" if float(val) >= 5 else "#ef4444"
+        sub_html = f'<div style="font-size:11px;color:#94a3b8;margin-top:2px">{subtitle}</div>' if subtitle else ""
+        return (
+            f'<div style="margin-bottom:12px">'
+            f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+            f'<span style="font-size:12px;font-weight:600;min-width:110px">{label}</span>'
+            f'<span style="font-size:14px;font-weight:700;color:{color}">{float(val):.1f}<span style="font-size:11px;color:#94a3b8">/10</span></span>'
+            f'</div>'
+            f'<div style="background:#f1f5f9;border-radius:6px;height:7px;overflow:hidden">'
+            f'<div style="width:{pct_val}%;height:100%;background:{color};border-radius:6px"></div>'
+            f'</div>{sub_html}</div>'
+        )
+
+    if _is_v5 and (_investment_thesis or _stage):
+        _thesis_text = _investment_thesis or f"{_stage} 阶段项目，{_investment_window} 投资时机"
+        _stage_color = {"Scaling": "#f59e0b", "Commercializing": "#22c55e", "PMF Signal": "#3b82f6",
+                        "Early OSS": "#8b5cf6", "Idea": "#94a3b8"}.get(_stage, "#94a3b8")
+        _v5_thesis_html = (
+            '\n  <!-- v5 Investment Thesis -->\n'
+            '  <div class="card" style="background:linear-gradient(135deg,#fefce8 0%,#fff 100%);border-color:#f59e0b">\n'
+            '    <h2 style="color:#b45309">🎯 INVESTMENT THESIS</h2>\n'
+            f'    <div style="font-size:15px;font-weight:600;color:#1a1a2e;line-height:1.6;margin-bottom:14px">{_thesis_text}</div>\n'
+            '    <div style="display:flex;gap:8px;flex-wrap:wrap">\n'
+            f'      <div style="padding:8px 14px;border-radius:8px;background:#fff;border:1px solid #e2e8f0;text-align:center;min-width:100px"><div style="font-size:10px;color:#64748b;font-weight:600;text-transform:uppercase">投资阶段</div><div style="font-size:13px;font-weight:700;color:{_stage_color};margin-top:2px">{_stage or "—"}</div></div>\n'
+            f'      <div style="padding:8px 14px;border-radius:8px;background:#fff;border:1px solid #e2e8f0;text-align:center;min-width:100px"><div style="font-size:10px;color:#64748b;font-weight:600;text-transform:uppercase">介入窗口</div><div style="font-size:13px;font-weight:700;color:#0f3460;margin-top:2px">{_investment_window or timing}</div></div>\n'
+            f'      <div style="padding:8px 14px;border-radius:8px;background:#fff;border:1px solid #e2e8f0;text-align:center;min-width:100px"><div style="font-size:10px;color:#64748b;font-weight:600;text-transform:uppercase">v5 评分</div><div style="font-size:16px;font-weight:700;color:#0f3460;margin-top:2px">{score.total_score if score else "—"}</div></div>\n'
+            f'      <div style="padding:8px 14px;border-radius:8px;background:#fff;border:1px solid #e2e8f0;text-align:center;min-width:100px"><div style="font-size:10px;color:#64748b;font-weight:600;text-transform:uppercase">v5 等级</div><div style="margin-top:4px">{grade_badge(score.grade if score else "—")}</div></div>\n'
+            '    </div>\n'
+            '  </div>'
+        )
+    else:
+        _v5_thesis_html = ""
+
+    if _is_v5:
+        _struct_moat = _v5_struct_detail.get("tech_moat", "")
+        _struct_plat = _v5_struct_detail.get("platform_potential", "")
+        _struct_int  = _v5_struct_detail.get("integration_depth", "")
+        _struct_extra = (
+            f'<div style="margin-top:10px;padding:10px;background:#f8fafc;border-radius:8px;font-size:12px;color:#374151">'
+            + (f'<strong>Tech Moat</strong>: {_struct_moat}&ensp;' if _struct_moat else "")
+            + (f'&nbsp;|&ensp;<strong>Platform</strong>: {_struct_plat}&ensp;' if _struct_plat else "")
+            + (f'&nbsp;|&ensp;<strong>Lock-in</strong>: {_struct_int}' if _struct_int else "")
+            + f'</div>'
+        ) if any([_struct_moat, _struct_plat, _struct_int]) else ""
+        _v5_score_cards_html = (
+            '\n  <!-- v5 三层评分卡 -->\n'
+            '  <div class="card">\n'
+            '    <h2>📊 v5 三层评分卡 <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">H×30% + C×30% + S×30% + M×10%</span></h2>\n'
+            + _score_bar(_health_score, "🏥 Health", _v5_signals_text.get("health", ""))
+            + _score_bar(_commercial_score, "💰 Commercial", _v5_signals_text.get("commercial", ""))
+            + _score_bar(_structural_score, "🔮 Structural", _v5_signals_text.get("structural", ""))
+            + _score_bar(_momentum_score, "🔥 Momentum", _v5_signals_text.get("momentum", ""))
+            + _struct_extra
+            + '\n  </div>'
+        )
+    else:
+        _v5_score_cards_html = ""
+
+    if _is_v5 and _maintainer_risk:
+        _dim_labels = [
+            ("concentration",       "维护者集中度"),
+            ("founder_dependency",  "创始人依赖"),
+            ("api_upstream",        "API/上游依赖"),
+            ("company_concentration","公司集中度"),
+            ("license_risk",        "License 风险"),
+            ("community_depth",     "社区深度"),
+        ]
+        _mrm_rows = "".join(
+            f'<tr><td>{lbl}</td><td>{_risk_badge(((_maintainer_risk.get(k) or {{}}).get("level", "")))}</td>'
+            f'<td style="font-size:12px;color:#64748b">{(_maintainer_risk.get(k) or {{}}).get("note", "—")}</td></tr>'
+            for k, lbl in _dim_labels
+        )
+        _maintainer_risk_html = (
+            '\n  <!-- v5 Maintainer Risk Matrix -->\n'
+            '  <div class="card">\n'
+            '    <h2>🔬 Maintainer Risk Matrix <span style="color:#94a3b8;font-size:10px;font-weight:400;text-transform:none">6-Dimension</span></h2>\n'
+            '    <div class="tbl-wrap"><table>\n'
+            '      <thead><tr><th>维度</th><th>风险等级</th><th>说明</th></tr></thead>\n'
+            f'      <tbody>{_mrm_rows}</tbody>\n'
+            '    </table></div>\n'
+            '  </div>'
+        )
+    else:
+        _maintainer_risk_html = ""
+
     # ── markdown content generation ──────────────────────────────────────────
     def _md_table(headers, rows):
         sep = "|".join("---" for _ in headers)
@@ -2665,6 +2797,8 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     <button class="dl-btn dl-btn-pdf" onclick="window.print()">🖨 导出 PDF（打印）</button>
   </div>
 
+  {_v5_thesis_html}
+
   <!-- 投资建议（置顶） -->
   <div class="rec-box" style="border-color:{rec_color};background:{rec_color}18">
     <div style="font-size:18px;font-weight:700;color:{rec_color};margin-bottom:6px">{rec}</div>
@@ -2681,6 +2815,8 @@ def generate_report(payload: ReportIn, db: Session = Depends(get_db)):
     <h2>📋 项目概况</h2>
     <div class="tbl-wrap"><table><tbody>{overview_html}</tbody></table></div>
   </div>
+
+  {_v5_score_cards_html}
 
   <!-- 2. 公司/组织背景 -->
   {company_section_html}

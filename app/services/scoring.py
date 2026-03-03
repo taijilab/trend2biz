@@ -266,3 +266,281 @@ def compute_score(metrics: dict, biz: Optional[dict]) -> dict:
             },
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# V5 Decision Engine
+# ---------------------------------------------------------------------------
+
+def _grade_v5(total: float) -> str:
+    if total >= 9.0:
+        return "S"
+    if total >= 7.5:
+        return "A"
+    if total >= 6.0:
+        return "B"
+    if total >= 4.0:
+        return "C"
+    return "D"
+
+
+# Structural score baselines by category (tech moat / platform potential heuristic)
+_STRUCTURAL_BY_CATEGORY: dict[str, float] = {
+    "agent":           7.5,
+    "security":        7.0,
+    "fintech":         6.8,
+    "data-platform":   7.0,
+    "infra":           7.2,
+    "devops":          6.5,
+    "devtools":        6.0,
+    "developer-tools": 5.8,
+    "observability":   6.5,
+    "low-code":        6.0,
+    "enterprise-saas": 6.2,
+    "edu-tech":        5.5,
+    "media-tech":      5.5,
+    "biotech":         7.0,
+    "robotics-iot":    7.0,
+}
+
+
+def _maintainer_risk_matrix(
+    bus_factor: float,
+    contributors_90d: int,
+    license_spdx: str,
+    owner_type: Optional[str],
+    category: Optional[str],
+) -> dict:
+    """Compute 6-dimension Maintainer Risk Matrix.
+
+    Each dimension returns a dict with 'level' ('high'|'medium'|'low') and 'note'.
+    """
+    # 1. Concentration risk (top-1 contributor share)
+    if bus_factor > 0.8:
+        concentration = {"level": "high", "note": f"顶级贡献者占 {bus_factor:.0%}，极高单点风险"}
+    elif bus_factor > 0.5:
+        concentration = {"level": "medium", "note": f"顶级贡献者占 {bus_factor:.0%}，中等集中度"}
+    else:
+        concentration = {"level": "low", "note": f"贡献者分布相对分散（top-1 占 {bus_factor:.0%}）"}
+
+    # 2. Founder dependency (solo user owner + few contributors)
+    if owner_type == "User" and contributors_90d < 5:
+        founder_dep = {"level": "high", "note": "个人仓库 + 活跃贡献者 <5，创始人依赖度极高"}
+    elif owner_type == "User":
+        founder_dep = {"level": "medium", "note": "个人仓库，但有一定外部贡献者参与"}
+    else:
+        founder_dep = {"level": "low", "note": "组织仓库，创始人个人依赖度相对较低"}
+
+    # 3. API/Upstream dependency (category heuristic)
+    _infra_categories = {"infra", "devops", "observability", "data-platform"}
+    if category in _infra_categories:
+        api_upstream = {"level": "medium", "note": f"{category} 项目通常有较强的上游云厂商 API 依赖"}
+    elif category == "agent":
+        api_upstream = {"level": "high", "note": "Agent 项目高度依赖底层 LLM API，上游变动风险高"}
+    else:
+        api_upstream = {"level": "low", "note": "上游 API 依赖风险较低"}
+
+    # 4. Company concentration (org with few contributors)
+    if owner_type == "Organization" and contributors_90d < 10:
+        company_conc = {"level": "high", "note": "组织仓库但活跃贡献者 <10，公司内部项目风险"}
+    elif owner_type == "Organization" and contributors_90d < 30:
+        company_conc = {"level": "medium", "note": "组织仓库，贡献者规模中等"}
+    else:
+        company_conc = {"level": "low", "note": "贡献者社区规模充足，公司集中度风险低"}
+
+    # 5. License risk
+    _lic = license_spdx.upper()
+    if "BUSL" in _lic or "SSPL" in _lic or "COMMONS" in _lic:
+        license_risk = {"level": "high", "note": f"License {license_spdx} 含商业限制条款"}
+    elif "AGPL" in _lic:
+        license_risk = {"level": "medium", "note": "AGPL 强传染性，企业商用需谨慎评估"}
+    elif "GPL" in _lic and "LGPL" not in _lic:
+        license_risk = {"level": "medium", "note": "GPL 传染性，混合使用需隔离"}
+    elif license_spdx in ("", "NOASSERTION", "OTHER"):
+        license_risk = {"level": "medium", "note": "License 未明确，商用合规需独立核查"}
+    else:
+        license_risk = {"level": "low", "note": f"License {license_spdx or '宽松'} 商用友好"}
+
+    # 6. Community depth
+    if contributors_90d >= 30:
+        community_depth = {"level": "low", "note": f"近 90 天 {contributors_90d} 位活跃贡献者，社区深度充足"}
+    elif contributors_90d >= 10:
+        community_depth = {"level": "medium", "note": f"近 90 天 {contributors_90d} 位活跃贡献者，社区初具规模"}
+    else:
+        community_depth = {"level": "high", "note": f"近 90 天仅 {contributors_90d} 位活跃贡献者，社区深度不足"}
+
+    return {
+        "concentration": concentration,
+        "founder_dependency": founder_dep,
+        "api_upstream": api_upstream,
+        "company_concentration": company_conc,
+        "license_risk": license_risk,
+        "community_depth": community_depth,
+    }
+
+
+def _investment_stage(stars: int, contributors_90d: int, commits_30d: int, biz: Optional[dict]) -> str:
+    """Classify project into investment stage."""
+    has_arr = False
+    has_commercial = False
+    if biz:
+        expl = biz.get("explanations") or {}
+        if isinstance(expl.get("revenue_info"), dict) and expl["revenue_info"].get("arr"):
+            has_arr = True
+        mc = biz.get("monetization_candidates") or []
+        _kws = ("saas", "cloud", "enterprise", "api", "企业版", "付费", "订阅", "商业")
+        if any(kw in m.lower() for m in mc for kw in _kws):
+            has_commercial = True
+
+    if has_arr and stars > 5000:
+        return "Scaling"
+    if has_commercial:
+        return "Commercializing"
+    if stars >= 2000 or (stars >= 500 and commits_30d > 50):
+        return "PMF Signal"
+    if stars >= 100 and contributors_90d >= 2:
+        return "Early OSS"
+    return "Idea"
+
+
+def _investment_window(stage: str) -> str:
+    return {
+        "Idea":           "观察",
+        "Early OSS":      "Pre-seed",
+        "PMF Signal":     "Seed",
+        "Commercializing": "Series A",
+        "Scaling":        "战略投资",
+    }.get(stage, "观察")
+
+
+def compute_score_v5(metrics: dict, biz: Optional[dict]) -> dict:
+    """V5 Decision Engine: 4-layer scoring H×0.30 + C×0.30 + S×0.30 + M×0.10."""
+    stars = metrics.get("stars") or 0
+    commits_30d = metrics.get("commits_30d") or 0
+    contributors_90d = metrics.get("contributors_90d") or 0
+    open_issues = metrics.get("open_issues") or 0
+    prs_30d = metrics.get("prs_30d") or 0
+    issues_30d = metrics.get("issues_30d") or 0
+    bus_factor = metrics.get("bus_factor_top1_share") or 0.0
+    license_spdx = (metrics.get("license_spdx") or "")
+    owner_type = metrics.get("owner_type")
+    star_history = metrics.get("star_history") or []
+
+    category = None
+    biz_expl: dict = {}
+    if biz:
+        category = biz.get("category")
+        biz_expl = biz.get("explanations") or {}
+
+    # ── Health Score (30%) ───────────────────────────────────────────────────
+    # Sub-dim 1: issue response rate (lower open_issues/issues_30d ratio = better)
+    if issues_30d > 0:
+        backlog_ratio = open_issues / (issues_30d * 3)  # 3-month expected backlog
+        issue_response = min(10.0, max(1.0, 10.0 - backlog_ratio * 3))
+    else:
+        issue_response = 5.0  # no data — neutral
+
+    # Sub-dim 2: PR merge activity
+    if prs_30d > 0:
+        pr_merge = min(10.0, max(1.0, 4.0 + prs_30d / 5))
+    else:
+        pr_merge = max(1.0, min(7.0, 3.0 + commits_30d / 50))  # fallback to commits
+
+    # Sub-dim 3: commit velocity
+    commit_velocity = min(10.0, max(1.0, 4.0 + commits_30d / 60))
+
+    # Sub-dim 4: bus factor (inverted — high concentration → low health)
+    bus_factor_inv = min(10.0, max(1.0, 10.0 - bus_factor * 5))
+
+    health = (issue_response * 0.25 + pr_merge * 0.25 + commit_velocity * 0.25 + bus_factor_inv * 0.25)
+
+    # ── Commercial Score (30%) ───────────────────────────────────────────────
+    _commercial_kws = ("saas", "cloud", "enterprise", "api", "企业版", "付费", "订阅", "商业")
+    if biz and biz.get("monetization_candidates"):
+        mc = biz["monetization_candidates"]
+        if any(kw in m.lower() for m in mc for kw in _commercial_kws):
+            commercial = 7.5
+        else:
+            commercial = 6.5
+    else:
+        commercial = 5.0
+    if isinstance(biz_expl.get("revenue_info"), dict) and biz_expl["revenue_info"].get("arr"):
+        commercial = min(10.0, commercial + 1.5)
+
+    # ── Structural Score (30%) ───────────────────────────────────────────────
+    v5_struct = biz_expl.get("v5_structural") or {}
+    if v5_struct and isinstance(v5_struct.get("score"), (int, float)):
+        structural = float(v5_struct["score"])
+    else:
+        structural = _STRUCTURAL_BY_CATEGORY.get(category or "", 5.5)
+
+    # ── Momentum Score (10%) ─────────────────────────────────────────────────
+    if len(star_history) >= 3:
+        try:
+            recent_growth = (star_history[-1][1] - star_history[-2][1]) / max(star_history[-2][1], 1)
+            prev_growth = (star_history[-2][1] - star_history[-3][1]) / max(star_history[-3][1], 1)
+            acceleration = recent_growth - prev_growth
+            momentum = min(10.0, max(1.0, 5.0 + acceleration * 20 + stars / 20000))
+        except Exception:
+            momentum = min(10.0, max(1.0, 4.5 + stars / 20000))
+    else:
+        momentum = min(10.0, max(1.0, 4.5 + stars / 20000))
+
+    total = health * 0.30 + commercial * 0.30 + structural * 0.30 + momentum * 0.10
+    grade = _grade_v5(total)
+
+    # ── Maintainer Risk Matrix ────────────────────────────────────────────────
+    maintainer_risk = _maintainer_risk_matrix(
+        bus_factor, contributors_90d, license_spdx, owner_type, category
+    )
+
+    # ── Investment Stage / Window ─────────────────────────────────────────────
+    stage = _investment_stage(stars, contributors_90d, commits_30d, biz)
+    investment_window = _investment_window(stage)
+
+    return {
+        "market_score": round(commercial, 2),    # repurposed: commercial → market_score column
+        "traction_score": round(health, 2),       # repurposed: health → traction_score column
+        "moat_score": round(structural, 2),       # repurposed: structural → moat_score column
+        "team_score": round(momentum, 2),
+        "monetization_score": round(commercial, 2),
+        "risk_score": round(health, 2),
+        "total_score": round(total, 2),
+        "grade": grade,
+        "model_name": "v5-decision-engine",
+        "highlights": _build_highlights(commercial, health, structural, commercial, biz),
+        "risks": _build_risks(health, structural, contributors_90d, stars, biz),
+        "followups": _build_followups(biz, grade),
+        "explanations": {
+            "model": "v5-decision-engine",
+            "health_score": round(health, 2),
+            "commercial_score": round(commercial, 2),
+            "structural_score": round(structural, 2),
+            "momentum_score": round(momentum, 2),
+            "hype_score": round(momentum, 2),
+            "stage": stage,
+            "investment_window": investment_window,
+            "maintainer_risk": maintainer_risk,
+            "v5_structural": v5_struct or None,
+            "weights": {
+                "health": 0.30,
+                "commercial": 0.30,
+                "structural": 0.30,
+                "momentum": 0.10,
+            },
+            "signals": {
+                "stars": stars,
+                "commits_30d": commits_30d,
+                "contributors_90d": contributors_90d,
+                "prs_30d": prs_30d,
+                "issues_30d": issues_30d,
+                "category": category,
+            },
+            "signals_text": {
+                "health": f"Health {round(health, 1)}/10 — issue_resp:{round(issue_response,1)} pr_merge:{round(pr_merge,1)} velocity:{round(commit_velocity,1)} bus_factor_inv:{round(bus_factor_inv,1)}",
+                "commercial": f"Commercial {round(commercial, 1)}/10 — {'明确商业路径' if commercial >= 7.5 else '候选路径' if commercial >= 6.5 else '待挖掘'}",
+                "structural": f"Structural {round(structural, 1)}/10 — {'LLM 评估' if v5_struct else '赛道基线估算'}（{category or '未知赛道'}）",
+                "momentum": f"Momentum {round(momentum, 1)}/10 — {stars:,} Stars，{'加速增长' if len(star_history) >= 3 else '绝对量估算'}",
+            },
+        },
+    }
