@@ -166,10 +166,11 @@ def compute_score(metrics: dict, biz: Optional[dict]) -> dict:
     elif bus_factor > 0.5:
         team = max(1.0, team - 0.5)
 
-    # monetization — 4-tier based on candidate type
+    # monetization — 4-tier based on candidate type (substring match for zh/en mixed strings)
+    _commercial_kws = ("saas", "cloud", "enterprise", "api", "企业版", "付费", "订阅", "商业")
     if biz and biz.get("monetization_candidates"):
         mc = biz["monetization_candidates"]
-        if any(m.lower() in ("saas", "cloud", "enterprise", "api") for m in mc):
+        if any(kw in m.lower() for m in mc for kw in _commercial_kws):
             monetization = 7.5  # clear commercial path
         else:
             monetization = 6.5  # candidates exist but non-mainstream

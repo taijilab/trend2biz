@@ -730,12 +730,12 @@ def generate_biz_profile_llm(
         f'  "description_zh": "2-3句中文项目介绍：说清楚是什么、解决什么问题、适合谁用",\n'
         f'  "bd_pitch": "3句话BD话术：①合作价值主张 ②对方核心痛点 ③我方可提供资源",\n'
         f'  "competitors": [\n'
-        f'    {{"name": "竞品名", "kind": "OSS|SaaS|OSS+SaaS", "pos": "定位（中文，15字内）", "diff": "与本项目差异（15字内）", "url": "https://github.com/...或空字符串"}}\n'
-        f'    // 列出3-5个该赛道真实竞品，按市场影响力排序\n'
+        f'    {{"name": "竞品名", "kind": "OSS|SaaS|OSS+SaaS", "pos": "定位（中文，15字内）", "diff": "与本项目差异（15字内）", "url": "https://github.com/...或空字符串"}},\n'
+        f'    {{"name": "竞品名2", "kind": "OSS|SaaS|OSS+SaaS", "pos": "定位", "diff": "差异", "url": ""}}\n'
         f'  ],\n'
         f'  "project_risks": [\n'
-        f'    {{"type": "风险类型（中文，8字内）", "level": "high|medium|low", "desc": "结合本项目具体情况描述（30字内）"}}\n'
-        f'    // 列出3-5条针对本项目的特定风险（License、技术、竞争、商业化等）\n'
+        f'    {{"type": "风险类型（中文，8字内）", "level": "high|medium|low", "desc": "结合本项目具体情况描述（30字内）"}},\n'
+        f'    {{"type": "风险类型2", "level": "medium", "desc": "描述2"}}\n'
         f'  ]\n'
         f'}}'
     )
@@ -869,7 +869,8 @@ def generate_biz_and_score(
         "stars": metric.stars if metric else 0,
         "commits_30d": metric.commits_30d if metric else 0,
         "contributors_90d": metric.contributors_90d if metric else 0,
-        "bus_factor_top1_share": metric.bus_factor_top1_share if metric else 0,
+        "bus_factor_top1_share": (metric.bus_factor_top1_share if metric else None) or 0.0,
+        "license_spdx": (biz_data.get("explanations") or {}).get("license", "") if biz_data else "",
     }
     score_data = compute_score(metric_payload, biz_data)
     score = upsert_score(
