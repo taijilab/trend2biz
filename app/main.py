@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Req
 from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, desc, func, or_, select, text
+from sqlalchemy import and_, desc, func, inspect, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -201,17 +201,26 @@ if _STATIC_DIR.is_dir():
 
 def _migrate_add_missing_columns() -> None:
     """Idempotent column migrations for databases created before schema additions."""
+    try:
+        jobs_cols = {c["name"] for c in inspect(engine).get_columns("jobs")}
+        projects_cols = {c["name"] for c in inspect(engine).get_columns("projects")}
+    except Exception as exc:
+        logger.warning("migration skipped (inspect tables): %s", exc)
+        return
+
     migrations = [
-        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_retries INTEGER NOT NULL DEFAULT 3",
-        "ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_login VARCHAR(255)",
-        "ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_type VARCHAR(50)",
+        ("jobs", "retry_count", "ALTER TABLE jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"),
+        ("jobs", "max_retries", "ALTER TABLE jobs ADD COLUMN max_retries INTEGER NOT NULL DEFAULT 3"),
+        ("projects", "owner_login", "ALTER TABLE projects ADD COLUMN owner_login VARCHAR(255)"),
+        ("projects", "owner_type", "ALTER TABLE projects ADD COLUMN owner_type VARCHAR(50)"),
     ]
-    with engine.connect() as conn:
-        for sql in migrations:
+    with engine.begin() as conn:
+        for table_name, col_name, sql in migrations:
+            table_cols = jobs_cols if table_name == "jobs" else projects_cols
+            if col_name in table_cols:
+                continue
             try:
                 conn.execute(text(sql))
-                conn.commit()
                 logger.info("migration ok: %s", sql[:60])
             except Exception as exc:
                 logger.warning("migration skipped (%s): %s", sql[:60], exc)
