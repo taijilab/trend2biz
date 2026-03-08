@@ -1,105 +1,603 @@
-# YC OSS Investment Analysis (v5 Decision Engine)
+---
+name: yc-oss-investment-analysis
+description: "Use this skill whenever the user asks to analyze an open-source project, GitHub repository, or tech startup from an investment perspective — especially in the style of YC (Y Combinator), seed-stage, or early-stage VC analysis. Triggers include: 'investment analysis', 'VC analysis', 'YC perspective', 'should I invest', 'evaluate this startup', 'analyze this repo', 'due diligence on this project', 'investment memo', or any request to assess a GitHub project's commercial potential, market opportunity, competitive landscape, or fundability. Also trigger when the user shares a GitHub URL and asks about viability, team, traction, risks, or business model. This skill covers open-source projects, developer tools, infrastructure software, AI/ML tools, and any tech project with a GitHub presence. Use this skill even if the user just says 'analyze this project' with a GitHub link — assume investment/commercial analysis unless context clearly indicates otherwise."
+---
 
-为指定开源项目生成 **v5 决策引擎** 投资分析报告（Investment Thesis 置首 + 三层评分卡 + Maintainer Risk Matrix）。
+# YC 视角开源技术项目投资分析 Skill（v3）
 
-## 使用方式
+## 概述
+
+本 Skill 指导 Claude 以 YC 早期投资人视角，对开源技术项目进行**量化评分 + 结构化分析**的投资报告。报告包含七维评分体系（10 分制）和完整的定性分析。
+
+v3 变更：新增「媒体与热度」维度；新增「公司/组织背景」深度调查流程与报告章节（含官网抓取、融资历史、收入客户、战略动态）；强化数据校验流程；增加产品分类防误判规则；牵引力评分增加反虚高机制。
+
+---
+
+## 工作流程
+
+### 第一步：信息收集（必须先搜后写，绝不跳过）
+
+⚠️ **铁律：先收集全部数据，再写一个字的分析。数据失真 = 报告作废。**
+
+按顺序执行，每步 1-3 次 web_search / web_fetch，总计 10-25 次（组织类仓库需更多搜索）：
+
+1. **GitHub 仓库（必须 web_fetch 实际页面）**
+   - `web_fetch` GitHub 主页 → 精确提取：stars / forks / contributors / commits / open issues / open PRs / 许可证 / 主语言
+   - ⚠️ **必须用页面实际数据，绝不使用缓存/记忆中的数据**
+   - 仔细阅读 README 全文，理解项目**真正做什么**
+   - **判断仓库所有者类型**：URL 路径中 `github.com/{owner}/{repo}` 的 `{owner}` 是个人账号还是组织（Organization）？
+
+2. **公司/组织背景调查（如果仓库属于组织，必须执行）**
+   - 判断依据：GitHub 页面显示 Organization 标识，或 owner 名称明显是公司/组织名
+   
+   **2a. GitHub 组织页面**
+   - `web_fetch` `https://github.com/{org}` → 组织简介、官网链接、公开成员数、公开仓库数、Verified 域名、地区
+   - 浏览组织的 Popular repositories → 该项目在组织中是否是 stars 最多的？其他仓库是什么？
+   - 记录：总仓库数、top 5 仓库及 stars、组织是否 Verified
+   
+   **2b. 公司官网**
+   - 从 GitHub 组织页面提取官网链接（通常在组织 bio 中）
+   - `web_fetch` 官网首页 → 公司定位（一句话 tagline）、产品列表、定价页面
+   - `web_fetch` 官网 /about 或 /company 或 /team → 创始人、团队、使命、办公地点
+   - `web_fetch` 官网 /pricing 或 /plans → 商业模式、定价结构
+   - `web_fetch` 官网 /blog 或 /news → 近期公告、产品发布、合作伙伴
+   
+   **2c. 公司基本信息搜索**
+   - `web_search` "{公司名} company founded headquarters" → 成立时间、注册地、法人结构（C-corp / PBC / LLC 等）
+   - `web_search` "{公司名} team size employees 2025 2026" → 团队规模、增长趋势、在招岗位数
+   
+   **2d. 融资与估值**
+   - `web_search` "{公司名} funding valuation investors crunchbase" → 每轮融资金额、领投方、估值
+   - `web_search` "{公司名} latest funding round 2025 2026" → 最新一轮详情
+   - 记录完整融资历史表（轮次 / 时间 / 金额 / 领投方 / 估值）
+   
+   **2e. 收入与客户**
+   - `web_search` "{公司名} revenue ARR customers 2025 2026" → 收入规模、增速、客户数、大客户案例
+   - 如果有该开源项目的独立收入数据，单独记录（如 "Claude Code ARR $2.5B"）
+   
+   **2f. 战略动态**
+   - `web_search` "{公司名} acquisition partnership 2025 2026" → 近期收购、战略合作
+   - `web_search` "{公司名} IPO lawsuit controversy" → 潜在上市计划、法律/监管风险、争议事件
+   
+   **需要搞清楚的关键问题**：
+   - 该仓库是公司的**核心产品**还是**副产品/开源贡献/内部工具开源化**？
+   - 公司的商业模式是什么？开源项目在商业版图中的战略角色是什么（获客漏斗 / 核心引擎 / 社区建设 / 标准制定）？
+   - 该项目是否有**独立的收入贡献**？占公司总收入的比例？
+   - 公司的资金状况是否健康？烧钱速度 vs 收入增速？
+   - 是否有近期的重大战略转向、高管变动、或争议事件？
+   
+   ⚠️ **组织类仓库的分析必须区分"项目"和"公司"两个层面**：项目可能很好但公司可能有风险，反之亦然
+
+3. **产品定位确认（关键步骤 — 防止分类错误）**
+   - 通读 README 后回答：给谁用？解决什么具体问题？属于什么产品类别？
+   - ⚠️ **严禁仅凭关键词推断类别**（详见"常见错误清单"）
+   - README 不够清楚时，`web_fetch` 官网 docs 页面确认
+
+4. **项目官网**：官网链接 → 产品定位、定价页面、团队页面、用户案例
+
+5. **创始团队（必须搜索）**
+   - `web_search` "{创始人名} {公司名}" → LinkedIn、个人网站、之前的公司/项目
+   - 从 GitHub 贡献者列表识别核心维护者，搜索其背景
+   - ⚠️ **不搜索团队 = 团队评分上限 4.0**
+
+6. **融资信息**：`web_search` "{公司名} funding valuation investors" → Crunchbase / PitchBook / 新闻
+
+7. **竞品搜索（必须基于真实产品类别）**
+   - 基于第 3 步确认的产品定位搜索**同类产品**
+   - ⚠️ **竞品必须和项目解决同一个问题**
+   - `web_search` "{真实产品类别} alternatives competitors funding"
+   - **对每个竞品，尝试找到其 GitHub 仓库 URL**：`web_search` "{竞品名} github"
+   - 如果竞品是闭源产品（如 GitHub Copilot），记录其官网 URL 代替
+
+8. **市场数据**：`web_search` "{准确细分市场名} market size TAM 2025 2026"
+
+9. **媒体与热度（必须执行）**
+   - `web_search` "{项目名}" → 统计近 3 个月内的科技新闻报道数量和来源质量
+   - `web_search` "{项目名} site:news.ycombinator.com" → Hacker News 讨论热度
+   - `web_search` "{项目名} OR {公司名} review" → Reddit、技术博客、Twitter/X 讨论
+   - 如果可用，参考 Google Trends 数据判断搜索热度趋势
+   - 记录：报道来源（tier-1 / tier-2 / 社区）、报道数量、情感倾向
+
+### 第二步：数据校验（写报告前的强制检查）
+
+| 必须确认 | 来源 | 未确认时处理 |
+|---------|------|-------------|
+| Stars 精确数字 | GitHub 页面 | 不写报告 |
+| License 类型 | GitHub 页面 | 标注"未确认" |
+| 产品真实类别 | README + 官网 | 不写报告 |
+| 仓库所有者类型 | GitHub 页面 | 判断是个人还是组织 |
+| 组织官网（若属于组织） | GitHub org 页面 | 必须找到并 web_fetch |
+| 组织融资信息（若属于组织） | 搜索结果 | 标注"⚠️ 未发现公开融资信息" |
+| 组织收入/客户信号（若属于组织） | 搜索结果 | 标注"⚠️ 未公开" |
+| 项目在公司中的角色（若属于组织） | README + 官网 + 搜索 | 必须明确判断 |
+| 创始人/核心团队至少 1 人 | 搜索结果 | 团队评分上限 4.0 |
+| 至少 2 个真实竞品 | 搜索结果 | 竞品部分标注"⚠️ 信息不足" |
+| 至少 1 条媒体/社区信号 | 搜索结果 | 媒体评分上限 5.0 |
+
+### 第三步：量化评分
+
+基于校验后的数据，按七维评分体系打分。**每个评分必须附 1-2 句数据支撑理由。**
+
+### 第四步：撰写报告
+
+按模板输出，Markdown 文件保存到 `/mnt/user-data/outputs/`。
+
+---
+
+## 七维评分体系
+
+每个维度 0-10 分，最终总分 = 七维加权平均。
+
+### 评分维度与权重
+
+| 维度 | 权重 | 评估内容 |
+|------|------|---------|
+| 🏪 市场（Market） | 18% | TAM 规模、增长率、时机、结构性变化 |
+| 📈 牵引力（Traction） | 18% | Stars 增速、社区活跃度、采用信号 |
+| 🔥 媒体与热度（Hype） | 12% | 科技媒体报道、Google Trends、HN/Reddit 讨论、开发者社区口碑 |
+| 🛡️ 护城河（Moat） | 13% | 技术壁垒、数据壁垒、网络效应、许可证策略 |
+| 👥 团队（Team） | 14% | Founder-Market Fit、技术深度、创业经验 |
+| 💰 商业化（Monetization） | 13% | 商业模式清晰度、定价策略、开源→收入转化 |
+| ⚠️ 风险（Risk） | 12% | 竞争威胁、依赖风险、法律/合规（分越高=风险越低） |
+
+### 总分计算公式
 
 ```
-/yc-oss-investment-analysis <GitHub repo URL 或 owner/repo>
+总分 = 市场×0.18 + 牵引力×0.18 + 媒体×0.12 + 护城河×0.13 + 团队×0.14 + 商业化×0.13 + 风险×0.12
 ```
 
-例如：
+### 总分等级
+
+| 等级 | 分数区间 | 含义 | 投资建议 |
+|------|---------|------|---------|
+| **S** | 9.0-10.0 | 极度看好 | 强烈推荐投资 |
+| **A** | 7.5-8.9 | 非常看好 | 推荐投资 |
+| **B** | 6.0-7.4 | 值得关注 | 条件性投资，需进一步验证 |
+| **C** | 4.0-5.9 | 一般 | 暂不推荐，持续观察 |
+| **D** | 0-3.9 | 不看好 | 不推荐 |
+
+---
+
+### 各维度评分细则
+
+#### 🏪 市场（Market）0-10
+
 ```
-/yc-oss-investment-analysis langchain-ai/langchain
-/yc-oss-investment-analysis https://github.com/ggerganov/llama.cpp
+9-10: TAM > $50B，CAGR > 25%，明确的结构性转折点（如 AI 浪潮），时机完美
+7-8:  TAM > $10B，CAGR > 15%，赛道热度高，有明确增长驱动力
+5-6:  TAM $1-10B，CAGR 10-15%，市场成熟但仍有增长空间
+3-4:  TAM < $1B，或增长缓慢，或时机不对
+0-2:  市场过小、萎缩、或缺乏可验证的市场数据
+```
+
+#### 📈 牵引力（Traction）0-10
+
+```
+9-10: Stars > 50k 且持续增长 6 个月+，有明确的企业/商业采用证据，广泛集成生态
+7-8:  Stars 10k-50k 增长强劲，社区活跃（外部 PR、活跃 issues），知名企业背书
+5-6:  Stars 2k-10k，增长趋势正向，有一定社区参与
+3-4:  Stars 200-2k，增长平缓，社区不活跃
+0-2:  Stars < 200，无明显采用信号
+```
+
+**⚠️ 牵引力反虚高规则：**
+- **爆发式增长需验证**：Stars 在 1-2 月内从 0 暴涨到 10k+，必须检查真实使用（npm 下载、Docker 拉取、Issue 质量）。未验证的爆发式增长，评分上限 7.0
+- **Fork/Star 比率**：> 15% = 有实际使用；< 5% = 可能纯围观
+- **外部贡献者比例**：> 20% = 社区健康；仅核心团队提交 = 不活跃
+- **Issues 质量**：真实 bug 报告/功能请求 > 纯问题/吐槽
+- **Stars ≠ 采用**：100k stars 个人工具可能只有 1000 日活
+
+#### 🔥 媒体与热度（Hype）0-10 — 新增维度
+
+```
+9-10: Tier-1 科技媒体（TechCrunch/Wired/The Verge 等）专题报道 3+ 篇；Google Trends 呈现持续上升趋势；HN 首页多次，讨论帖 300+ comments；Twitter/X 上行业 KOL 大量讨论
+7-8:  Tier-1 媒体报道 1-2 篇或 Tier-2 媒体（The Register/InfoWorld/Help Net Security 等）多篇报道；HN 首页至少 1 次（100+ comments）；Google Trends 有明显上升；开发者博客/YouTube 有多个评测
+5-6:  Tier-2 媒体报道 1-2 篇；HN/Reddit 有讨论但热度一般（< 100 comments）；Google Trends 有可检测信号但不突出；少量个人博客评测
+3-4:  仅社区级讨论（个人博客、小众论坛）；无主流媒体报道；Google Trends 无明显信号
+0-2:  几乎无外部讨论；搜索结果仅返回 GitHub 页面本身
+```
+
+**媒体评估要素：**
+
+| 信号类型 | 高价值来源 | 低价值来源 |
+|---------|-----------|-----------|
+| 科技新闻 | TechCrunch, Wired, The Verge, Ars Technica, VentureBeat | 内容农场、AI 生成的聚合文章 |
+| 安全/开发者 | Help Net Security, InfoWorld, The Register, SecurityWeek | SEO 博客、付费软文 |
+| 社区讨论 | Hacker News (高 upvote), Reddit (高互动), Twitter/X KOL | 水军评论、自我推广帖 |
+| 开发者内容 | 知名开发者博客、YouTube 深度评测 | 无深度的"awesome list"收录 |
+| 搜索热度 | Google Trends 持续上升、搜索建议自动补全 | 一次性脉冲后消失 |
+
+**⚠️ 媒体热度与牵引力的区别：**
+- 牵引力衡量**产品被使用**的程度（Stars、Forks、下载量、Issues）
+- 媒体热度衡量**产品被谈论**的程度（新闻报道、社区讨论、搜索兴趣）
+- 两者可以不一致：高热度+低牵引力 = 炒作泡沫；低热度+高牵引力 = 低调实力派
+
+#### 🛡️ 护城河（Moat）0-10
+
+```
+9-10: 强网络效应 + 数据壁垒 + 高切换成本 + 专有技术，难以替代
+7-8:  有明确的技术壁垒或数据优势，替代品存在但差距明显
+5-6:  有一定差异化但技术可复制，护城河主要来自先发优势和社区
+3-4:  技术壁垒低，核心是 LLM/API 包装，容易被复制或被上游吞噬
+0-2:  无差异化，纯粹的开源包装，随时可被替代
+```
+
+**护城河评估要点：**
+- 许可证策略（AGPL 防 SaaS 化、BSL 商业保护等）
+- 是否依赖单一上游（如单一 LLM 供应商）
+- 大厂入场风险（能否被 FAANG 轻松复制）
+- 社区锁定效应（插件生态、集成生态）
+
+#### 👥 团队（Team）0-10
+
+```
+9-10: 连续创业者有成功退出经历，深厚领域专家，团队完整（技术+商业+领域）
+7-8:  有相关行业经验，团队互补，来自知名公司
+5-6:  团队背景一般但有热情，或信息不足但产品质量暗示能力
+3-4:  团队信息极度缺乏，或团队过小且无法验证能力
+0-2:  明显的团队问题（无领域经验、不稳定、核心成员离开）
+```
+
+⚠️ **信息不足时，团队评分上限为 5.0 分。未搜索团队信息，上限 4.0 分。**
+
+#### 💰 商业化（Monetization）0-10
+
+```
+9-10: 已有规模收入（ARR > $1M），Open Core 验证，企业客户付费
+7-8:  商业模式清晰（Open Core / SaaS / 托管服务），有早期付费客户或明确定价
+5-6:  有商业化意图和路径（Pro 版、企业版），但尚未验证
+3-4:  商业模式模糊，或完全开源无商业化迹象
+0-2:  纯开源项目，无商业化意图
+```
+
+#### ⚠️ 风险（Risk）0-10 — 分越高 = 风险越低
+
+```
+9-10: 无明显竞争威胁，无依赖风险，法律合规无忧
+7-8:  有竞争但差异化明确，依赖可管理，合规风险低
+5-6:  有明确竞品且竞品融资充足，或有单一依赖
+3-4:  强竞品领先显著，或重度依赖单一供应商，或存在法律/伦理风险
+0-2:  多个致命风险并存（强竞品碾压 + 技术可复制 + 法律风险）
 ```
 
 ---
 
-## 你的任务
+## 商业画像推断
 
-### 第一步：解析仓库名
+| 属性 | 可选值 |
+|------|--------|
+| **产品类型** | `agent` · `personal-assistant` · `devtool` · `infra` · `framework` · `library` · `platform` · `saas-oss` · `security-tool` · `data-tool` |
+| **商业模式** | `Open-core` · `SaaS` · `Managed` · `Support` · `Dual-license` · `Marketplace` · `未明确` |
+| **增长动力** | `PLG`（产品驱动） · `SLG`（销售驱动） · `CLG`（社区驱动） · `MLG`（市场驱动） |
+| **目标买方** | 推断谁会签合同（如 CISO、CTO、VP Eng、个人用户等） |
+| **置信度** | 0-100%（仅 GitHub 关键词 ≤ 65%；+官网验证 ≤ 80%；+融资/团队验证 ≤ 95%） |
 
-从参数中提取 `owner/repo`（去掉 `https://github.com/` 前缀）。
-
-### 第二步：在本地数据库查找项目
-
-```
-GET http://localhost:8000/api/v1/projects/search?q=<repo_name>&limit=5
-```
-
-- 找到匹配的项目后记录 `project_id`。
-- 如果本地无数据，告知用户该项目尚未被 Trend2Biz 采集，建议先触发 Trending 采集或直接用 GitHub API 补充基础摘要（见第五步）。
-
-### 第三步：触发 v5 LLM 分析（确保报告含 Investment Thesis）
-
-检查项目是否已有 llm-v1 模型的 biz profile：
-
-```
-GET http://localhost:8000/api/v1/projects/<project_id>/biz-profiles
-```
-
-如果最新 biz profile 的 `version` **不是** `llm-v1`，或尚无 biz profile，则触发 LLM 分析以生成 v5_structural + investment_thesis：
-
-```
-POST http://localhost:8000/api/v1/projects/<project_id>/biz-profiles:generate
-Content-Type: application/json
-
-{"model": "llm-v1"}
-```
-
-等待 Job 完成（轮询 `GET http://localhost:8000/api/v1/jobs/<job_id>` 直到 `status` 为 `done` 或 `failed`，最多等 60 秒）。
-
-> 注意：若 LLM 分析失败（`status=failed`）或服务端无 LLM Key，继续到第四步即可，后端会降级为 rule-v1 报告（无 Investment Thesis）。
-
-### 第四步：生成 v5 报告
-
-```
-POST http://localhost:8000/api/v1/reports:generate
-Content-Type: application/json
-
-{"project_id": "<project_id>"}
-```
-
-返回值示例：`{"report_id": "abc123", "url": "/reports/abc123"}`
-
-拿到 `report_id` 后获取 Markdown 内容：
-
-```
-GET http://localhost:8000/api/v1/reports/<report_id>/markdown
-```
-
-将返回的 Markdown **完整输出**给用户，并告知：
-- HTML 完整报告（含 v5 交互式图表）：`http://localhost:8000/reports/<report_id>`
-- 若报告顶部出现 **🎯 INVESTMENT THESIS** 卡片 + **📊 v5 三层评分卡**，表示 v5 Decision Engine 已生效
-
-### 第五步：仅当本地无数据时，用 GitHub API 补充
-
-```
-GET https://api.github.com/repos/<owner>/<repo>
-```
-
-用基础字段（stars、forks、language、description、created_at、pushed_at、open_issues_count）
-手动构造一份简化版摘要输出，并提示用户先让系统采集该项目再生成完整报告。
+⚠️ 产品类型中 `agent` 仅用于 **AI Agent 开发框架/编排平台**。个人 AI 助手应归类为 `personal-assistant`，AI 安全工具归为 `security-tool`。
 
 ---
 
-## v5 报告结构说明
+## 报告模板
 
-v5 Decision Engine 报告包含以下新增章节（llm-v1 模式下）：
+输出报告时严格按以下结构：
 
-| 章节 | 内容 |
+```markdown
+# {项目名} / {公司名} — 投资分析报告
+
+> **项目**: [{项目名}]({GitHub URL}) — {一句话描述}
+> **公司/组织**: {公司名}（{自我定位}）| 仓库类型：{🏢 组织 / 👤 个人}
+> **GitHub**: ⭐ {stars} · 🍴 {forks} · 👥 {contributors} · {commits} commits
+> **许可证**: {许可证} | **语言**: {主要语言}
+> **分析日期**: {日期}
+
+---
+
+## 评分概览
+
+| 等级 | 总分 |
+|:----:|:----:|
+| **{S/A/B/C/D}** | **{X.X}** / 10.0 |
+
+| 维度 | 分数 | 一句话理由 |
+|------|:----:|-----------|
+| 🏪 市场 | {X.X} | {理由} |
+| 📈 牵引力 | {X.X} | {理由} |
+| 🔥 媒体热度 | {X.X} | {理由} |
+| 🛡️ 护城河 | {X.X} | {理由} |
+| 👥 团队 | {X.X} | {理由} |
+| 💰 商业化 | {X.X} | {理由} |
+| ⚠️ 风险 | {X.X} | {理由}（分越高=风险越低） |
+
+---
+
+## 商业画像
+
+| 属性 | 值 |
+|------|-----|
+| 产品类型 | {type} |
+| 商业模式 | {model} |
+| 增长动力 | {motion} — {一句话描述} |
+| 目标买方 | {buyer persona} |
+| 置信度 | {X}% |
+
+---
+
+## 一、项目概述
+
+{2-3 段：做什么、解决什么问题、核心技术方法、关键成果}
+
+---
+
+## 二、公司/组织背景 🏢
+
+> 仅当仓库属于 GitHub Organization 或明确关联公司时输出此章节。个人开发者项目跳过此节，在团队章节中说明。
+
+### 基本信息
+
+| 属性 | 值 |
+|------|-----|
+| 组织/公司名 | {名称} |
+| 官网 | {URL} |
+| 成立时间 | {年份} |
+| 注册地 | {地点} |
+| 法人结构 | {C-corp / PBC / LLC / 基金会 / ⚠️ 未知} |
+| 团队规模 | {人数 / 范围 / ⚠️ 未知}（来源：{来源}） |
+| 在招岗位数 | {数量 / ⚠️ 未知} |
+| GitHub 公开仓库数 | {数量} |
+| GitHub 组织 Verified | {是 / 否} |
+| 该项目在公司中的角色 | {核心产品 / 副产品 / 开源贡献 / 内部工具开源化 / 获客漏斗 / 标准制定} |
+
+### 融资历史
+
+| 轮次 | 时间 | 金额 | 领投方 | 估值（post-money） |
+|------|------|------|--------|----------------|
+| {轮次} | {时间} | {金额} | {领投方} | {估值} |
+
+| 累计融资 | {总金额} |
+|---------|---------|
+| 最新估值 | {金额}（{日期}） |
+
+{无融资记录时标注：⚠️ 未发现公开融资信息}
+
+### 收入与客户
+
+| 指标 | 数据 | 来源 |
+|------|------|------|
+| 公司整体 ARR | {数据 / ⚠️ 未公开} | {来源} |
+| 该项目独立 ARR | {数据 / N/A} | {来源} |
+| 客户数量 | {数据 / ⚠️ 未公开} | {来源} |
+| 大客户案例 | {名称} | {来源} |
+| 收入增速 | {YoY / MoM 数据} | {来源} |
+
+{无收入数据时标注：⚠️ 未发现公开收入信息}
+
+### 商业版图
+{公司有哪些产品线？开源项目在其中扮演什么角色？是获客工具、核心技术引擎、还是社区建设？公司是否有其他收入来源？该项目收入占公司总收入的比例？}
+
+### 战略动态（近 12 个月）
+{近期收购、战略合作伙伴关系、重大产品发布、高管变动、IPO 计划、争议事件}
+
+### 公司 vs 项目风险提示
+{分别标注 ✅（正面）和 ⚠️（风险）：
+- 项目命运是否过度依赖公司？
+- 公司资金状况是否健康（烧钱速度 vs 收入）？
+- 是否存在公司层面的额外风险（监管、诉讼、战略转向、关键人物变动）？
+- 公司的法人结构是否可能影响投资/退出？}
+
+---
+
+## 三、市场机会（🏪 {X.X}/10）
+
+### TAM / SAM / SOM
+
+| 维度 | 规模 | 来源 |
+|------|------|------|
+| TAM | {数据} | {来源} |
+| SAM | {数据} | {来源} |
+| SOM | {估算} | {推理} |
+
+### 增长驱动力
+{3-5 个核心驱动力，每个 2-3 句}
+
+### 市场时机：{🟢极佳 / 🟡一般 / 🔴不佳}
+{为什么是/不是好时机}
+
+---
+
+## 四、产品与技术
+
+### 技术架构
+{核心架构、技术栈、创新点}
+
+### 核心优势
+{3-5 个差异化优势}
+
+### 当前局限
+{3-5 个短板}
+
+### 商业模式
+
+| 产品层 | 定位 | 许可/定价 |
+|--------|------|----------|
+| {开源版} | {描述} | {许可证} |
+| {商业版} | {描述} | {定价} |
+
+---
+
+## 五、牵引力与社区（📈 {X.X}/10）
+
+| 指标 | 数据 | 评估 |
+|------|------|------|
+| Stars / 增速 | | |
+| Forks / Fork率 | | |
+| Contributors (外部占比) | | |
+| Open Issues / PRs | | |
+| Commit 频率 (30d) | | |
+| 知名背书 | | |
+
+### 亮点
+{3-5 条社区/采用亮点}
+
+---
+
+## 六、媒体与热度（🔥 {X.X}/10）
+
+### 媒体报道
+
+| 来源级别 | 媒体名称 | 报道时间 | 内容概要 |
+|---------|---------|---------|---------|
+| Tier-1 / Tier-2 / 社区 | {名称} | {时间} | {一句话} |
+
+### 社区讨论
+- **Hacker News**: {讨论次数 / 最高 comments 数 / 主要讨论点}
+- **Reddit**: {相关讨论热度}
+- **Twitter/X**: {KOL 讨论情况}
+- **开发者博客/YouTube**: {评测数量和质量}
+
+### 搜索热度
+- **Google Trends 趋势**: {上升/平稳/下降/无数据}
+- **搜索建议补全**: {是否出现在 Google 自动补全中}
+
+### 热度 vs 实质判断
+{热度是否与牵引力匹配？是实力型增长还是炒作型增长？}
+
+---
+
+## 七、竞争格局（🛡️ {X.X}/10）
+
+### 直接竞争对手
+
+| 竞品 | GitHub / 官网 | 融资 | 核心差异 | 威胁等级 |
+|------|-------------|------|---------|---------|
+| [{竞品名}]({GitHub URL 或官网 URL}) | ⭐ {stars} / 闭源 | {金额} | {差异} | 🔴/🟠/🟡/🟢 |
+
+> **链接规则**：竞品名用 Markdown 链接格式 `[名称](URL)` 渲染为可点击链接。优先使用 GitHub 仓库 URL；闭源产品使用官网 URL。"GitHub / 官网"列显示 stars 数或标注"闭源"。
+
+### 间接竞争 / 大厂风险
+{3-5 个相邻威胁}
+
+### 竞争分析要点
+{最大威胁、差异化壁垒、大厂入场风险}
+
+---
+
+## 八、团队（👥 {X.X}/10）
+
+### 已知信息
+{创始人背景、经验、行业地位}
+
+### 评估
+{Founder-Market Fit、团队完整性。信息不足标注 ⚠️}
+
+---
+
+## 九、投资亮点（Bull Case）
+{5-7 条}
+
+---
+
+## 十、核心风险（Bear Case · ⚠️ {X.X}/10）
+
+### 🔴 高风险
+### 🟠 中高风险
+### 🟡 中等风险
+
+---
+
+## 十一、追问清单
+{6-10 个必须回答的尽调问题}
+
+---
+
+## 十二、投资建议
+
+### 综合评级：{等级} · {总分}/10
+
+**核心判断**：{2-3 句}
+
+**升级条件**：{满足什么条件可上调评级}
+
+**降级条件**：{什么风险兑现会下调评级}
+
+**对标参考**：{1-3 个类似路径的成功/失败案例}
+
+---
+
+*免责声明：本分析基于公开信息，不构成投资建议。实际投资决策应基于完整的尽职调查。*
+```
+
+---
+
+## 分析原则
+
+### 1. 数据驱动，零容忍虚假数据
+每个评分必须有具体数据支撑。信息不足标注 ⚠️ 并设评分上限。
+**⚠️ 绝不编造或使用未验证的数据。** Stars/Forks/Issues 等必须来自 web_fetch 的实际 GitHub 页面。
+
+### 2. 产品定位先行，拒绝关键词分类
+**必须通读 README 和官网后再做产品分类。** 常见错误：
+- ❌ 描述含"agent" → 归类为"agent 框架" → 竞品列 LangChain/AutoGen
+- ✅ 通读后发现是"个人 AI 助手，连接 WhatsApp/Slack" → `personal-assistant` → 竞品列同类助手产品
+- ❌ 描述含"security" → 归类为"安全扫描" → 竞品列 Snyk
+- ✅ 通读后发现是"AI 渗透测试" → `security-tool` → 竞品列 XBOW/Horizon3
+
+### 3. 评分要有区分度
+避免温和评分（全部 6-7 分）。**同一份报告中最高分和最低分之差应 ≥ 3 分。** 真正优秀给 8-9，明显薄弱给 3-4。
+
+### 4. 竞品分析必须精准
+- 竞品必须和项目**解决同一个用户问题**
+- 每个竞品必须有搜索验证的融资/规模数据
+- 绝不使用"规则库模板"式的竞品列表
+- 没有合适竞品时分析**相邻赛道潜在威胁**
+
+### 5. 媒体热度需辨别虚实
+- 区分 Tier-1/Tier-2/社区级来源，给予不同权重
+- 警惕 AI 生成的聚合文章、SEO 软文、内容农场
+- **热度脉冲 vs 持续关注**：一次性爆发后消失 ≠ 持续性行业关注
+- 热度与牵引力不匹配时，需在报告中明确标注风险
+
+### 6. YC 核心视角
+Founder-Market Fit · 为什么是现在 · 10x 改进 · 可防御性 · 市场规模能否支撑独角兽
+
+### 7. 开源专属评估
+许可证战略 · Stars vs 真实采用 · 开源→商业转化漏斗 · Fork 风险 · 社区健康度
+
+### 8. 客观坦诚
+竞争对手优势如实承认。风险分析具体到公司名和数字。不过度乐观也不过度悲观。
+
+---
+
+## 常见错误清单（必须避免）
+
+| ❌ 错误 | ✅ 正确做法 |
+|---------|-----------|
+| Stars 数据和 GitHub 页面不一致 | 必须从 web_fetch 结果提取精确数字 |
+| License 写"—"但页面上有 | 从 GitHub 页面精确提取 |
+| 产品类型凭关键词猜测 | 通读 README + 官网后确认 |
+| 组织仓库但不查公司背景 | 组织类仓库必须调查公司信息 |
+| 不区分"项目"和"公司"两个层面 | 项目好 ≠ 公司好，分别评估风险 |
+| 竞品和项目不在同一赛道 | 基于真实产品定位选择竞品 |
+| 所有维度评分集中在 6-8 分 | 拉开区分度，允许 3 分和 9 分并存 |
+| 团队评估只看贡献者数量 | 搜索创始人背景、经验、行业地位 |
+| 风险评估全是模板语言 | 每条风险具体到公司名、金额、事件 |
+| Star 暴增就给满分 | 检查 Fork 率、Issue 质量、npm 下载等 |
+| 媒体热度只看数量 | 区分来源质量（Tier-1 vs 内容农场） |
+| 把"被讨论"等同于"被使用" | 媒体热度 ≠ 牵引力，分别评分 |
+
+---
+
+## 常见场景
+
+| 场景 | 处理 |
 |------|------|
-| 🎯 Investment Thesis | 一句话投资核心逻辑 + 投资阶段/窗口/评分摘要 |
-| 📊 v5 三层评分卡 | Health(30%) + Commercial(30%) + Structural(30%) + Momentum(10%) 进度条 |
-| 🔬 Maintainer Risk Matrix | 6 维度风险评估（集中度/创始人依赖/API依赖/公司集中/License/社区深度）|
+| 只给 GitHub 链接 | 完整流程 |
+| 链接 + 特定关注点 | 完整报告 + 在指定维度加深 |
+| 对比多个项目 | 每个项目评分 + 对比矩阵 |
+| 信息严重不足 | 开头标注局限性，评分设上限 |
+| 极早期（< 100 stars） | 降低牵引力/媒体权重，提升团队/技术评估 |
 
-旧版 YC 7 维评分卡保留在 `<details>` 折叠区，向下兼容。
+## 输出要求
 
----
-
-## 注意事项
-
-- 报告逻辑由后端 `app/main.py:generate_report()` 维护，**不要在此重复定义评分标准**。
-- v5 评分等级阈值：S≥9.0 / A≥7.5 / B≥6.0 / C≥4.0 / D<4.0（比旧版更严格）。
-- 如需调整分析逻辑，修改 `app/services/scoring.py:compute_score_v5()` 即可。
+- 默认 Markdown 文件 → `/mnt/user-data/outputs/`
+- 跟随用户语言
+- 长度 3000-6000 字
+- 分数保留一位小数
